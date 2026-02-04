@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual envs
+venv/
+.venv/
+Gemmamed/
+
+# Training outputs / adapters
+medgemma*_icu_lora/
+outputs/
+reports/
+
+# Data artifacts
+/data/*.csv
+/data/*.jsonl
+/data/*.parquet
+/data/*.npy
+/data/*.npz
+
+# User datasets
+sepsis2019_psv/
+set-a/
+
+# OS
+.DS_Store
+Thumbs.db
+todo.txt
+.env
+/physionet2012/dataset
+/physionet2019/dataset
