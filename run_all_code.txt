@@ -1,0 +1,5 @@
+Bash    
+chmod +x run_all_4_models.sh
+./run_all_models.sh
+Powershell
+.\run_all_models.ps1
