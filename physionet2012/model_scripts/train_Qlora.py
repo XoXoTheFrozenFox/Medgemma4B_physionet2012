@@ -9,6 +9,13 @@
 # - Fixes warnings:
 #     * use_cache=True incompatible with gradient checkpointing -> force-disable use_cache everywhere + silence logger
 #     * PyTorch checkpoint use_reentrant warning -> enable GC with use_reentrant=False when supported + safe patch
+#
+# EXTRA FIXES (from your errors.py OOM during evaluate):
+# - Adds eval_max_len (make eval cheaper than train)
+# - Forces half-precision full-eval when supported (fp16_full_eval / bf16_full_eval)
+# - prediction_loss_only=True (no logits/preds stored)
+# - Adds quantization sanity prints to confirm you really loaded 4-bit
+# - Optional --no_eval to completely disable evaluation (useful to confirm train step is stable)
 # ------------------------------------------------------------
 
 import argparse
@@ -92,14 +99,12 @@ def force_disable_use_cache_everywhere(model):
             return
         visited.add(oid)
 
-        # direct flag
         if hasattr(obj, "use_cache"):
             try:
                 obj.use_cache = False
             except Exception:
                 pass
 
-        # common nested config holders
         for attr in (
             "config",
             "generation_config",
@@ -114,7 +119,6 @@ def force_disable_use_cache_everywhere(model):
                 except Exception:
                     pass
 
-    # model + common sub-objects
     _set_use_cache(model)
     for attr in ("model", "base_model", "language_model", "vision_tower", "vision_model"):
         if hasattr(model, attr):
@@ -123,7 +127,6 @@ def force_disable_use_cache_everywhere(model):
             except Exception:
                 pass
 
-    # configs attached to submodules
     try:
         for m in model.modules():
             if hasattr(m, "config"):
@@ -185,6 +188,25 @@ def print_gpu_mem(prefix=""):
         print(f"{prefix}CUDA mem: allocated={a:.2f}GB reserved={r:.2f}GB max_alloc={m:.2f}GB")
     except Exception:
         pass
+
+
+def print_quant_sanity(model):
+    """
+    Confirms you actually loaded bitsandbytes 4-bit modules.
+    If you see 0 Linear4bit modules, you're not in true QLoRA memory mode.
+    """
+    print("[info] model.is_loaded_in_4bit:", getattr(model, "is_loaded_in_4bit", None))
+    try:
+        import bitsandbytes as bnb
+
+        n4 = sum(1 for m in model.modules() if isinstance(m, bnb.nn.Linear4bit))
+        n8 = sum(1 for m in model.modules() if isinstance(m, bnb.nn.Linear8bitLt))
+        print("[info] bnb Linear4bit modules:", n4)
+        print("[info] bnb Linear8bit modules:", n8)
+        if n4 == 0:
+            print("[warn] No Linear4bit modules detected. This usually means 4-bit load did NOT apply.")
+    except Exception as e:
+        print("[warn] bitsandbytes import/inspection failed:", repr(e))
 
 
 # ------------------------------------------------------------
@@ -324,6 +346,7 @@ def pick_target_module_paths(model):
 def _supports_trainingargs_kw(cls, kw: str) -> bool:
     try:
         import inspect
+
         return kw in inspect.signature(cls.__init__).parameters
     except Exception:
         return False
@@ -340,6 +363,7 @@ def main():
     ap.add_argument("--out_dir", type=str, default="medgemma4b_icu_qlora_4bit")
 
     ap.add_argument("--max_len", type=int, default=1024)
+    ap.add_argument("--eval_max_len", type=int, default=0, help="0 => use --max_len; set smaller to reduce eval VRAM")
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--batch", type=int, default=1)
@@ -356,6 +380,9 @@ def main():
     ap.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "linear", "constant"])
     ap.add_argument("--log_steps", type=int, default=10)
     ap.add_argument("--save_merged", action="store_true")
+
+    # NEW: allow disabling eval entirely (useful if eval is what OOMs)
+    ap.add_argument("--no_eval", action="store_true", help="Disable evaluation to avoid eval OOM; saves adapter only.")
 
     args = ap.parse_args()
 
@@ -402,6 +429,7 @@ def main():
         token=token,
     )
     print_gpu_mem("[after load]  ")
+    print_quant_sanity(model)
 
     # Force-disable cache flags everywhere (top + nested)
     force_disable_use_cache_everywhere(model)
@@ -445,22 +473,31 @@ def main():
         pass
 
     train_ds = load_dataset("json", data_files={"train": args.train_jsonl})["train"].shuffle(seed=args.seed)
-    val_ds = load_dataset("json", data_files={"val": args.val_jsonl})["val"]
+
+    if not args.no_eval:
+        val_ds = load_dataset("json", data_files={"val": args.val_jsonl})["val"]
+    else:
+        val_ds = None
 
     train_tok = train_ds.map(
         lambda ex: tokenize_fn(processor, ex, args.max_len),
         remove_columns=train_ds.column_names,
         desc="Tokenizing train",
     )
-    val_tok = val_ds.map(
-        lambda ex: tokenize_fn(processor, ex, args.max_len),
-        remove_columns=val_ds.column_names,
-        desc="Tokenizing val",
-    )
+
+    if val_ds is not None:
+        eval_len = args.max_len if args.eval_max_len <= 0 else args.eval_max_len
+        val_tok = val_ds.map(
+            lambda ex: tokenize_fn(processor, ex, eval_len),
+            remove_columns=val_ds.column_names,
+            desc="Tokenizing val",
+        )
+    else:
+        val_tok = None
 
     collator = CausalLMPadCollator(pad_token_id=pad_id)
 
-    eval_strategy = "epoch" if args.eval_steps == 0 else "steps"
+    eval_strategy = "no" if args.no_eval else ("epoch" if args.eval_steps == 0 else "steps")
     save_strategy = "epoch" if args.eval_steps == 0 else "steps"
 
     steps_per_epoch = math.ceil(len(train_tok) / max(1, args.batch * args.grad_accum))
@@ -482,13 +519,13 @@ def main():
         report_to="none",
         remove_unused_columns=False,
         group_by_length=True,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
         max_grad_norm=1.0,
         warmup_steps=warmup_steps,
+        # Make sure Trainer won't “undo” GC settings
+        gradient_checkpointing=True,
     )
 
+    # ---- Eval/Save strategy kw compat ----
     if _supports_trainingargs_kw(TrainingArguments, "eval_strategy"):
         ta_kwargs["eval_strategy"] = eval_strategy
     else:
@@ -497,9 +534,33 @@ def main():
     if _supports_trainingargs_kw(TrainingArguments, "save_strategy"):
         ta_kwargs["save_strategy"] = save_strategy
 
-    if args.eval_steps != 0:
-        ta_kwargs["eval_steps"] = args.eval_steps
-        ta_kwargs["save_steps"] = args.eval_steps
+    # ---- Eval memory reducers (only if eval is enabled) ----
+    if not args.no_eval:
+        # Explicit eval batch size
+        if _supports_trainingargs_kw(TrainingArguments, "per_device_eval_batch_size"):
+            ta_kwargs["per_device_eval_batch_size"] = 1
+
+        # Force half-precision full-eval where supported (prevents fp32-ish eval spikes)
+        if _supports_trainingargs_kw(TrainingArguments, "fp16_full_eval"):
+            ta_kwargs["fp16_full_eval"] = (compute_dtype == torch.float16)
+        if _supports_trainingargs_kw(TrainingArguments, "bf16_full_eval"):
+            ta_kwargs["bf16_full_eval"] = (compute_dtype == torch.bfloat16)
+
+        # Do not store logits/preds
+        if _supports_trainingargs_kw(TrainingArguments, "prediction_loss_only"):
+            ta_kwargs["prediction_loss_only"] = True
+
+        # These require eval to exist
+        ta_kwargs["load_best_model_at_end"] = True
+        ta_kwargs["metric_for_best_model"] = "eval_loss"
+        ta_kwargs["greater_is_better"] = False
+
+        if args.eval_steps != 0:
+            ta_kwargs["eval_steps"] = args.eval_steps
+            ta_kwargs["save_steps"] = args.eval_steps
+    else:
+        # No eval => can't load best model at end
+        ta_kwargs["load_best_model_at_end"] = False
 
     train_args = TrainingArguments(**ta_kwargs)
 

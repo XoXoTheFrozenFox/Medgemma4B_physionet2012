@@ -33,3 +33,5 @@ todo.txt
 .env
 /physionet2012/dataset
 /physionet2019/dataset
+/physionet2012/results
+physionet2012/apps/streamlit/app.py

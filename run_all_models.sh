@@ -3,6 +3,8 @@ set -euo pipefail
 
 # ============================================================
 # CONFIG
+#   sudo chmod +x ./run_all_models.sh
+#   ./run_all_models.sh
 # ============================================================
 
 BASE_DIR="/home/heystekgrobler/Documents/Medgemma4B_physionet2012-2019"
@@ -12,11 +14,22 @@ ENV_FILE="$BASE_DIR/.env"
 # Optional fallback if conda not on PATH:
 CONDA_BASE="${CONDA_BASE:-$HOME/miniconda3}"
 
-# Training params
-MAX_LEN=1024
-BATCH=1
-GRAD_ACCUM=8
-EPOCHS=1
+# Training params (common)
+MAX_LEN="${MAX_LEN:-1024}"
+BATCH="${BATCH:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
+EPOCHS="${EPOCHS:-1}"
+LR="${LR:-2e-4}"
+
+# Eval / logging (only used if script supports flags)
+EVAL_STEPS="${EVAL_STEPS:-0}"          # 0 => eval per epoch (if supported)
+EVAL_MAX_LEN="${EVAL_MAX_LEN:-512}"    # cheaper eval (if supported)
+LOG_STEPS="${LOG_STEPS:-10}"
+NO_EVAL="${NO_EVAL:-0}"                # 1 => pass --no_eval if supported
+
+# Helpful VRAM fragmentation settings
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:128}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 # ============================================================
 # LOAD .env (HF_TOKEN) - safe parser (no process substitution)
@@ -28,9 +41,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-# Load only simple KEY=VALUE lines, ignore comments/blanks
 while IFS= read -r line || [[ -n "$line" ]]; do
-  # trim
   line="${line#"${line%%[![:space:]]*}"}"
   line="${line%"${line##*[![:space:]]}"}"
 
@@ -41,7 +52,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     key="${line%%=*}"
     val="${line#*=}"
 
-    # strip surrounding quotes if present
     if [[ ( "${val:0:1}" == "\"" && "${val: -1}" == "\"" ) || ( "${val:0:1}" == "'" && "${val: -1}" == "'" ) ]]; then
       val="${val:1:${#val}-2}"
     fi
@@ -64,19 +74,15 @@ if command -v conda >/dev/null 2>&1; then
   if [[ -n "$CONDA_BASE_DETECTED" && -f "$CONDA_BASE_DETECTED/etc/profile.d/conda.sh" ]]; then
     # shellcheck disable=SC1090
     source "$CONDA_BASE_DETECTED/etc/profile.d/conda.sh"
+  elif [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
   else
-    # fallback to default
-    if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
-      # shellcheck disable=SC1090
-      source "$CONDA_BASE/etc/profile.d/conda.sh"
-    else
-      echo "ERROR: Could not find conda.sh via conda info --base or CONDA_BASE."
-      echo "Set CONDA_BASE to your conda install folder."
-      exit 1
-    fi
+    echo "ERROR: Could not find conda.sh via conda info --base or CONDA_BASE."
+    echo "Set CONDA_BASE to your conda install folder."
+    exit 1
   fi
 else
-  # conda not on PATH, try CONDA_BASE directly
   if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
     # shellcheck disable=SC1090
     source "$CONDA_BASE/etc/profile.d/conda.sh"
@@ -126,12 +132,12 @@ OUT_DIR_L2="$BASE_DIR/physionet2019/results/lora"
 # HELPERS
 # ============================================================
 
-assert_file() {
-  [[ -f "$1" ]] || { echo "ERROR: missing file: $1"; exit 1; }
-}
+assert_file() { [[ -f "$1" ]] || { echo "ERROR: missing file: $1"; exit 1; }; }
+ensure_dir() { mkdir -p "$1"; }
 
-ensure_dir() {
-  mkdir -p "$1"
+script_supports_flag() {
+  local script="$1" flag="$2"
+  python "$script" --help 2>&1 | grep -q -- "$flag"
 }
 
 run_train() {
@@ -146,17 +152,55 @@ run_train() {
   echo "=============================="
   echo "RUN:   $label"
   echo "Script $script"
+  echo "Train  $train"
+  echo "Val    $val"
   echo "Out    $out"
   echo "=============================="
 
-  python "$script" \
-    --train_jsonl "$train" \
-    --val_jsonl   "$val" \
-    --out_dir     "$out" \
-    --max_len     "$MAX_LEN" \
-    --batch       "$BATCH" \
-    --grad_accum  "$GRAD_ACCUM" \
-    --epochs      "$EPOCHS"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "[nvidia-smi] snapshot:"
+    nvidia-smi || true
+  fi
+
+  # Build args safely (only include flags the script supports)
+  args=( "--train_jsonl" "$train"
+         "--val_jsonl"   "$val"
+         "--out_dir"     "$out"
+         "--max_len"     "$MAX_LEN"
+         "--batch"       "$BATCH"
+         "--grad_accum"  "$GRAD_ACCUM"
+         "--epochs"      "$EPOCHS" )
+
+  if script_supports_flag "$script" "--lr"; then
+    args+=( "--lr" "$LR" )
+  fi
+
+  if script_supports_flag "$script" "--log_steps"; then
+    args+=( "--log_steps" "$LOG_STEPS" )
+  fi
+
+  # Pass HF token if script supports --hf_token
+  if script_supports_flag "$script" "--hf_token"; then
+    args+=( "--hf_token" "$HF_TOKEN" )
+  fi
+
+  # Eval knobs (only if supported)
+  if script_supports_flag "$script" "--eval_steps"; then
+    args+=( "--eval_steps" "$EVAL_STEPS" )
+  fi
+
+  if script_supports_flag "$script" "--eval_max_len"; then
+    args+=( "--eval_max_len" "$EVAL_MAX_LEN" )
+  fi
+
+  if [[ "$NO_EVAL" == "1" ]] && script_supports_flag "$script" "--no_eval"; then
+    args+=( "--no_eval" )
+  fi
+
+  # Log to file too
+  log_file="$out/run_$(date +%Y%m%d_%H%M%S).log"
+  echo "[info] logging -> $log_file"
+  python "$script" "${args[@]}" 2>&1 | tee "$log_file"
 }
 
 # ============================================================

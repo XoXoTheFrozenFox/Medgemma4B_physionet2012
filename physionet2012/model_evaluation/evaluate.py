@@ -1,3 +1,17 @@
+#!/usr/bin/env python
+# evaluate.py
+# ------------------------------------------------------------
+# Evaluate MedGemma LoRA / QLoRA adapters on val.jsonl (prompt/target)
+# Fixes included:
+# - Loads processor/tokenizer from adapter_dir when available (avoids HF download)
+# - Supports LoRA (fp16/bf16) and QLoRA (4-bit NF4) base loading
+# - Forces “JSON-only” instruction onto prompts (without editing dataset)
+# - Blocks '<unused94>thought' token/sequence where tokenizer supports it
+# - Decodes ONLY generated continuation (not prompt echo)
+# - Robustly extracts the FIRST valid JSON object (handles repeated JSON blocks)
+# - Writes adapter_loaded into outputs + metrics
+# ------------------------------------------------------------
+
 import argparse
 import json
 import os
@@ -32,7 +46,7 @@ def pick_compute_dtype():
 
 
 def ensure_dir(p: str):
-    os.makedirs(p, exist_ok=True) 
+    os.makedirs(p, exist_ok=True)
 
 
 def read_jsonl(path: str) -> List[dict]:
@@ -52,17 +66,69 @@ def load_val(path: str, max_samples: int, seed: int) -> List[dict]:
     return recs[:max_samples]
 
 
-def extract_json(text: str) -> Optional[dict]:
-    # robust: take first "{" and last "}"
-    s = text.find("{")
-    e = text.rfind("}")
-    if s == -1 or e == -1 or e <= s:
-        return None
-    blob = text[s:e + 1]
-    try:
-        return json.loads(blob)
-    except Exception:
-        return None
+def _strip_code_fences(text: str) -> str:
+    t = text.strip()
+    # remove ```json ... ``` or ``` ... ```
+    if t.startswith("```"):
+        lines = t.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```"):
+            # find closing fence
+            try:
+                end_idx = max(i for i, ln in enumerate(lines) if ln.strip() == "```")
+                inner = "\n".join(lines[1:end_idx]).strip()
+                return inner
+            except Exception:
+                return t
+    return t
+
+
+def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
+    """
+    Robust JSON extractor that returns (obj, blob) for the FIRST complete JSON object.
+    Handles cases where model outputs repeated JSON blocks back-to-back.
+
+    - strips code fences
+    - finds first '{'
+    - scans forward with brace-depth while respecting strings/escapes
+    - returns the first balanced {...} that parses as JSON
+    """
+    text = _strip_code_fences(text)
+
+    start = text.find("{")
+    if start == -1:
+        return None, None
+
+    depth = 0
+    in_str = False
+    esc = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+
+        # not in string
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                blob = text[start : i + 1]
+                try:
+                    return json.loads(blob), blob
+                except Exception:
+                    return None, blob
+
+    return None, None
 
 
 def parse_target_field(target: Any) -> Any:
@@ -314,17 +380,55 @@ def load_model_with_adapter(
         device_map={"": 0},
         torch_dtype=torch_dtype if mode == "lora" else None,
         quantization_config=quant_cfg if mode == "qlora" else None,
+        low_cpu_mem_usage=True,
     )
+
+    adapter_loaded = False
 
     # Attach adapter if present
     try:
         from peft import PeftModel
+
         model = PeftModel.from_pretrained(base, adapter_dir)
+        adapter_loaded = True
     except Exception:
         model = base
 
     model.eval()
-    return model, processor
+    return model, processor, adapter_loaded
+
+
+def build_bad_words_ids(tok) -> Optional[List[List[int]]]:
+    """
+    Blocks the exact sequence we saw in outputs.
+    Uses tokenizer() so it works even if it's multiple tokens.
+    """
+    bad_sequences = ["<unused94>thought"]
+    bad_ids: List[List[int]] = []
+
+    for s in bad_sequences:
+        try:
+            ids = tok(s, add_special_tokens=False).input_ids
+            if isinstance(ids, list) and len(ids) > 0:
+                bad_ids.append([int(i) for i in ids])
+        except Exception:
+            continue
+
+    return bad_ids if bad_ids else None
+
+
+def strengthen_prompt_for_json(prompt: str) -> str:
+    """
+    Adds a hard constraint without changing your dataset files.
+    Also tells the model to output EXACTLY ONE json object (prevents repeats).
+    """
+    return (
+        prompt.rstrip()
+        + "\n\n"
+        + "IMPORTANT: Output ONLY valid JSON. Start with '{' and end with '}'. "
+          "Output exactly ONE JSON object and stop. Do not repeat the JSON. "
+          "Do not include any other words, headings, code fences, or analysis."
+    )
 
 
 # ---------------------------
@@ -347,7 +451,7 @@ def evaluate_one_run(
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available.")
 
-    model, processor = load_model_with_adapter(
+    model, processor, adapter_loaded = load_model_with_adapter(
         base_model=base_model,
         adapter_dir=run.adapter_dir,
         mode=run.mode,
@@ -355,6 +459,7 @@ def evaluate_one_run(
         compute_dtype=compute_dtype,
     )
     tok = processor.tokenizer
+    bad_words_ids = build_bad_words_ids(tok)
 
     # Outputs
     outputs_path = os.path.join(run_dir, "sample_outputs.jsonl")
@@ -370,19 +475,21 @@ def evaluate_one_run(
     latencies = []
     gen_lengths = []
 
-    # deterministic-ish
-    rng = np.random.default_rng(seed)
+    # deterministic-ish (reserved; keep for future sampling modes)
+    _ = np.random.default_rng(seed)
 
     with open(outputs_path, "w", encoding="utf-8") as outf:
         for rec in val_recs:
-            prompt = rec.get("prompt", "")
+            base_prompt = rec.get("prompt", "")
+            prompt = strengthen_prompt_for_json(base_prompt)
             target_raw = rec.get("target", "")
             tgt = parse_target_field(target_raw)
 
             inputs = _apply_chat(processor, prompt)
+            prompt_len = int(inputs["input_ids"].shape[-1])  # BEFORE cuda
+
             inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
-            # timing (GPU)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
@@ -394,6 +501,7 @@ def evaluate_one_run(
                     temperature=0.0,
                     eos_token_id=tok.eos_token_id,
                     pad_token_id=tok.pad_token_id,
+                    bad_words_ids=bad_words_ids,
                 )
 
             torch.cuda.synchronize()
@@ -402,18 +510,22 @@ def evaluate_one_run(
             latency = t1 - t0
             latencies.append(latency)
 
-            gen_ids = out[0].tolist()
-            gen_lengths.append(len(gen_ids))
+            # Decode ONLY generated continuation
+            gen = out[0][prompt_len:]
+            gen_len = int(gen.shape[-1]) if hasattr(gen, "shape") else len(gen.tolist())
+            gen_lengths.append(gen_len)
 
-            gen_text = tok.decode(out[0], skip_special_tokens=True)
-            pred = extract_json(gen_text)
+            gen_text_full = tok.decode(gen, skip_special_tokens=True).strip()
+
+            # Robust: parse first JSON object only (handles repeated JSON blocks)
+            pred, blob = extract_first_json(gen_text_full)
+            raw_out_to_store = blob if blob is not None else gen_text_full
 
             ok = isinstance(pred, dict)
             json_ok += int(ok)
 
             req_ok_rates.append(required_keys_rate(pred, required_keys))
 
-            # compute metrics only when target is dict AND pred is dict
             if ok and isinstance(tgt, dict):
                 t_status = str(tgt.get("status", "unknown"))
                 p_status = str(pred.get("status", "unknown"))
@@ -441,10 +553,12 @@ def evaluate_one_run(
                     {
                         "prompt": prompt,
                         "target": tgt,
-                        "raw_output": gen_text,
+                        "raw_output": raw_out_to_store,  # first JSON blob if found, else full text
                         "pred_json": pred,
                         "latency_s": latency,
-                        "gen_len_tokens": len(gen_ids),
+                        "gen_len_tokens": gen_len,
+                        "prompt_len_tokens": prompt_len,
+                        "adapter_loaded": adapter_loaded,
                     },
                     ensure_ascii=False,
                 )
@@ -455,6 +569,7 @@ def evaluate_one_run(
         "run_name": run.name,
         "mode": run.mode,
         "adapter_dir": run.adapter_dir,
+        "adapter_loaded": bool(adapter_loaded),
         "samples": len(val_recs),
         "json_parse_rate": float(json_ok / max(1, len(val_recs))),
         "required_keys_rate_mean": float(np.mean(req_ok_rates)) if req_ok_rates else 0.0,
@@ -485,7 +600,10 @@ def evaluate_one_run(
             f.write(rep)
 
     # training curves (if exists)
-    plot_training_curves(os.path.join(run.adapter_dir, "trainer_state.json"), os.path.join(run_dir, "training_loss.png"))
+    plot_training_curves(
+        os.path.join(run.adapter_dir, "trainer_state.json"),
+        os.path.join(run_dir, "training_loss.png"),
+    )
 
     # metric bar
     bar_keys = [
@@ -504,6 +622,7 @@ def evaluate_one_run(
         "",
         f"- Mode: **{run.mode}**",
         f"- Adapter: **{run.adapter_dir}**",
+        f"- Adapter loaded: **{metrics['adapter_loaded']}**",
         f"- Samples: **{metrics['samples']}**",
         f"- JSON parse rate: **{metrics['json_parse_rate']:.3f}**",
         f"- Required keys rate (mean): **{metrics['required_keys_rate_mean']:.3f}**",
@@ -531,20 +650,19 @@ def evaluate_one_run(
 def write_combined_report(all_metrics: List[dict], out_dir: str):
     ensure_dir(out_dir)
 
-    # combined json
     with open(os.path.join(out_dir, "all_metrics.json"), "w", encoding="utf-8") as f:
         json.dump(all_metrics, f, indent=2)
 
-    # combined markdown table
     lines = [
         "# Adapter comparison",
         "",
-        "| run | mode | json_parse | req_keys | status_acc | drivers_f1 | checks_f1 | rougeL | latency_s | gen_len |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| run | mode | adapter_loaded | json_parse | req_keys | status_acc | drivers_f1 | checks_f1 | rougeL | latency_s | gen_len |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for m in all_metrics:
         lines.append(
-            f"| {m['run_name']} | {m['mode']} | {m['json_parse_rate']:.3f} | {m['required_keys_rate_mean']:.3f} | "
+            f"| {m['run_name']} | {m['mode']} | {int(bool(m.get('adapter_loaded')))} | "
+            f"{m['json_parse_rate']:.3f} | {m['required_keys_rate_mean']:.3f} | "
             f"{m['status_accuracy']:.3f} | {m['drivers_f1_mean']:.3f} | {m['checks_f1_mean']:.3f} | "
             f"{m['rougeL_narrative_mean']:.3f} | {m['latency_s_mean']:.3f} | {m['gen_len_tokens_mean']:.1f} |"
         )
@@ -552,13 +670,15 @@ def write_combined_report(all_metrics: List[dict], out_dir: str):
     with open(os.path.join(out_dir, "comparison.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    # simple “winner” heuristics (optional)
-    # pick best by rougeL then drivers_f1
-    best = sorted(
-        all_metrics,
-        key=lambda x: (x.get("rougeL_narrative_mean", 0.0), x.get("drivers_f1_mean", 0.0)),
-        reverse=True,
-    )[0] if all_metrics else None
+    best = (
+        sorted(
+            all_metrics,
+            key=lambda x: (x.get("rougeL_narrative_mean", 0.0), x.get("drivers_f1_mean", 0.0)),
+            reverse=True,
+        )[0]
+        if all_metrics
+        else None
+    )
 
     if best:
         with open(os.path.join(out_dir, "best.txt"), "w", encoding="utf-8") as f:
@@ -596,13 +716,18 @@ def main():
 
     required_keys = [k.strip() for k in args.required_keys.split(",") if k.strip()]
 
-    # Build run list
     runs: List[RunSpec] = []
     for s in args.run:
         runs.append(parse_run(s))
 
     if not runs and args.adapter_dir and args.mode:
-        runs.append(RunSpec(name=os.path.basename(args.adapter_dir.rstrip("/\\")), adapter_dir=args.adapter_dir, mode=args.mode))
+        runs.append(
+            RunSpec(
+                name=os.path.basename(args.adapter_dir.rstrip("/\\")),
+                adapter_dir=args.adapter_dir,
+                mode=args.mode,
+            )
+        )
 
     if not runs:
         raise SystemExit(
@@ -610,7 +735,6 @@ def main():
             "or --adapter_dir + --mode."
         )
 
-    # Load val
     val_recs = load_val(args.val_jsonl, args.max_samples, args.seed)
 
     all_metrics = []

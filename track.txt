@@ -1,0 +1,29 @@
+[Charlene&Bernard] Format readme.md❌
+physionet2012
+	apps
+		[Charlene] Mobile❌ dart flutter
+		[Charlene] Web❌ react no hosting needed
+		[Charlene] Desktop❌html css javascript ionic electron
+	[Charlene&Bernard] Backend❌ FastAPI
+	[Bernard] dataset✅
+	[Bernard] dataset_scripts✅
+	[Charlene&Bernard] documentation❌ 
+	[Bernard] model_evaluation❌ 
+	[Bernard] model_notebooks✅ 
+	[Bernard] model_scripts ✅
+	[Bernard] results ✅
+	[Bernard] other ✅
+physionet2019
+	apps 
+		[Charlene] Mobile❌
+		[Charlene] Web❌
+		[Charlene] Desktop❌
+	[Charlene&Bernard] Backend❌
+	[Bernard] dataset✅
+	[Bernard] dataset_scripts✅
+	[Charlene&Bernard] documentation❌ 
+	[Bernard] model_evaluation❌ 
+	[Bernard] model_notebooks✅ 
+	[Bernard] model_scripts ✅
+	[Bernard] results ✅
+	[Bernard] other ✅

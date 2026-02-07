@@ -1,19 +1,21 @@
-# train_lora_fp16_4b.py
+# train_lora_4b.py
 # ------------------------------------------------------------
-# MedGemma 4B LoRA fine-tuning WITHOUT quantization (fp16/bf16)
-# - Uses AutoModelForImageTextToText + AutoProcessor
+# MedGemma 4B LoRA fine-tuning (NO quantization)
+# - Full-precision base model (fp16/bf16) + LoRA adapters (LoRA)
 # - Correct loss masking: trains ONLY on assistant tokens
 # - Pad-safe collator: label padding uses -100
 # - Adds token_type_ids (REQUIRED for Gemma3 training)
 # - Avoids LoRA injection into vision tower by targeting non-vision module paths
-# - Removes warmup_ratio deprecation by using warmup_steps
-# - TrainingArguments compatibility across transformers versions
 # - Fixes warnings:
 #     * use_cache=True incompatible with gradient checkpointing -> force-disable use_cache everywhere + silence logger
 #     * PyTorch checkpoint use_reentrant warning -> enable GC with use_reentrant=False when supported + safe patch
+#
+# NOTE:
+# - This is the SAME training pipeline as your QLoRA script, but:
+#   ✅ removed BitsAndBytes 4-bit load
+#   ✅ removed prepare_model_for_kbit_training()
+#   ✅ loads the base model in fp16/bf16 (depending on GPU support)
 # ------------------------------------------------------------
-# Example:
-# python train_lora_fp16_4b.py --epochs 1 --max_len 1024 --lora_r 16 --grad_accum 8
 
 import argparse
 import math
@@ -38,18 +40,13 @@ from transformers import (
 
 from hf_auth import get_hf_token, try_with_token
 
-DEFAULT_MODEL = "google/medgemma-1.5-4b-it"  # MedGemma 1.5 is 4B-only
+DEFAULT_MODEL = "google/medgemma-1.5-4b-it"
 
 
 # ------------------------------------------------------------
 # PyTorch checkpoint warning fix (PyTorch 2.9 will require explicit use_reentrant)
 # ------------------------------------------------------------
 def patch_torch_checkpoint_default_use_reentrant_false():
-    """
-    If torch.utils.checkpoint.checkpoint supports `use_reentrant`, wrap it so callers that
-    don't pass the kwarg default to use_reentrant=False (recommended by PyTorch).
-    Safe no-op on older PyTorch that doesn't have the kwarg.
-    """
     try:
         import inspect
         import torch.utils.checkpoint as ckpt
@@ -74,10 +71,6 @@ def patch_torch_checkpoint_default_use_reentrant_false():
 
 
 def enable_gc_no_reentrant(model):
-    """
-    Enable gradient checkpointing with use_reentrant=False when supported by transformers.
-    Falls back gracefully on older transformers.
-    """
     if not hasattr(model, "gradient_checkpointing_enable"):
         return
     try:
@@ -145,8 +138,8 @@ def force_disable_use_cache_everywhere(model):
 @contextmanager
 def suppress_use_cache_gc_warning():
     """
-    The 'use_cache=True incompatible with gradient checkpointing...' line is a logger.warning,
-    not a Python warning. Silence the relevant Transformers loggers *only* during GC enable.
+    That 'use_cache=True incompatible with gradient checkpointing' line is a logger.warning,
+    not a Python warning. We silence the relevant Transformers loggers *only* during GC enable.
     """
     names = [
         "transformers.modeling_utils",
@@ -199,13 +192,9 @@ def print_gpu_mem(prefix=""):
 # Chat helpers (text-only)
 # ------------------------------------------------------------
 def _messages_text_only(prompt: str, target: str | None = None) -> List[Dict[str, Any]]:
-    """
-    MedGemma expects multimodal-style messages. For text-only:
-    content is a list with a single {"type":"text","text": ...}.
-    """
     msgs = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     if target is not None:
-        msgs.append({"role": "assistant", "content": [{"type": "text", "text": target}]})
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": target}]} )
     return msgs
 
 
@@ -242,12 +231,6 @@ def _apply_chat(processor, messages, max_len: int, add_generation_prompt: bool):
 
 
 def tokenize_fn(processor, example, max_len: int):
-    """
-    Correct loss masking:
-    - input_ids: full conversation (user + assistant)
-    - labels: -100 for user portion, real ids for assistant portion
-    - token_type_ids: REQUIRED for Gemma3 training; for text-only we use all zeros
-    """
     prompt = example["prompt"]
     target = example["target"]
 
@@ -260,6 +243,7 @@ def tokenize_fn(processor, example, max_len: int):
     input_ids = full["input_ids"]
     attention_mask = full["attention_mask"]
 
+    # Gemma3 requires token_type_ids during training; text-only => zeros.
     token_type_ids = [0] * len(input_ids)
 
     labels = list(input_ids)
@@ -311,15 +295,11 @@ class CausalLMPadCollator:
 # Target modules (avoid vision tower)
 # ------------------------------------------------------------
 def pick_target_module_paths(model):
-    """
-    Return FULL module paths to target for LoRA, excluding vision components.
-    Avoids accidentally injecting LoRA into vision blocks that may also have q_proj/k_proj/etc.
-    """
     suffixes = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     banned_tokens = ("vision", "visual", "image", "encoder")
 
     targets = []
-    for name, _ in model.named_modules():
+    for name, _module in model.named_modules():
         leaf = name.split(".")[-1]
         if leaf in suffixes:
             lname = name.lower()
@@ -358,13 +338,14 @@ def main():
     ap.add_argument("--train_jsonl", type=str, default="data/train.jsonl")
     ap.add_argument("--val_jsonl", type=str, default="data/val.jsonl")
     ap.add_argument("--model_name", type=str, default=DEFAULT_MODEL)
-    ap.add_argument("--out_dir", type=str, default="medgemma4b_icu_lora_fp16")
+    ap.add_argument("--out_dir", type=str, default="medgemma4b_icu_lora")
 
     ap.add_argument("--max_len", type=int, default=1024)
+    ap.add_argument("--eval_max_len", type=int, default=0, help="0 => use --max_len; set smaller to reduce eval VRAM")
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--batch", type=int, default=1)
-    ap.add_argument("--grad_accum", type=int, default=8)
+    ap.add_argument("--grad_accum", type=int, default=16)
     ap.add_argument("--seed", type=int, default=7)
 
     ap.add_argument("--lora_r", type=int, default=16)
@@ -378,10 +359,12 @@ def main():
     ap.add_argument("--log_steps", type=int, default=10)
     ap.add_argument("--save_merged", action="store_true")
 
+    ap.add_argument("--no_eval", action="store_true", help="Disable evaluation to avoid eval OOM; saves adapter only.")
+
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
-        raise SystemExit("CUDA not available. Install PyTorch CUDA wheels and verify with a CUDA check script.")
+        raise SystemExit("CUDA not available.")
 
     patch_torch_checkpoint_default_use_reentrant_false()
 
@@ -395,6 +378,7 @@ def main():
     compute_dtype = pick_compute_dtype()
     print("compute_dtype:", compute_dtype)
 
+    # Processor
     processor = try_with_token(AutoProcessor.from_pretrained, args.model_name, token=token)
     tok = getattr(processor, "tokenizer", None)
     if tok is None:
@@ -406,12 +390,16 @@ def main():
         tok.pad_token = tok.eos_token
     pad_id = tok.pad_token_id
 
+    # -----------------------------
+    # LoRA load (NO 4-bit quant)
+    # -----------------------------
     print_gpu_mem("[before load] ")
     model = try_with_token(
         AutoModelForImageTextToText.from_pretrained,
         args.model_name,
-        torch_dtype=compute_dtype,
         device_map={"": 0},
+        torch_dtype=compute_dtype,       # fp16/bf16 on GPU where supported
+        low_cpu_mem_usage=True,
         token=token,
     )
     print_gpu_mem("[after load]  ")
@@ -419,17 +407,20 @@ def main():
     # Force-disable cache flags everywhere (top + nested)
     force_disable_use_cache_everywhere(model)
 
-    # Enable gradient checkpointing (silence the specific logger line if it tries to emit)
+    # Enable gradient checkpointing (silence the specific logger line even if it tries to flip)
     with suppress_use_cache_gc_warning():
         enable_gc_no_reentrant(model)
 
-    # Force again in case any wrapper toggled it during GC enable
+    # And force again (belt + suspenders)
     force_disable_use_cache_everywhere(model)
 
-    # LoRA (exclude vision tower by targeting full paths)
+    if hasattr(model, "enable_input_require_grads"):
+        # harmless for fp16/bf16, and helps some backbones under GC
+        model.enable_input_require_grads()
+
     target_modules = pick_target_module_paths(model)
     print("LoRA target modules count:", len(target_modules))
-    print("LoRA target sample:", target_modules[:10])
+    print("LoRA target sample:", target_modules[:8])
 
     lora_cfg = LoraConfig(
         r=args.lora_r,
@@ -441,7 +432,7 @@ def main():
     )
     model = get_peft_model(model, lora_cfg)
 
-    # PEFT wrapping can re-introduce nested configs -> force again
+    # After wrapping with PEFT, force-disable cache again
     force_disable_use_cache_everywhere(model)
 
     try:
@@ -450,22 +441,31 @@ def main():
         pass
 
     train_ds = load_dataset("json", data_files={"train": args.train_jsonl})["train"].shuffle(seed=args.seed)
-    val_ds = load_dataset("json", data_files={"val": args.val_jsonl})["val"]
+
+    if not args.no_eval:
+        val_ds = load_dataset("json", data_files={"val": args.val_jsonl})["val"]
+    else:
+        val_ds = None
 
     train_tok = train_ds.map(
         lambda ex: tokenize_fn(processor, ex, args.max_len),
         remove_columns=train_ds.column_names,
         desc="Tokenizing train",
     )
-    val_tok = val_ds.map(
-        lambda ex: tokenize_fn(processor, ex, args.max_len),
-        remove_columns=val_ds.column_names,
-        desc="Tokenizing val",
-    )
+
+    if val_ds is not None:
+        eval_len = args.max_len if args.eval_max_len <= 0 else args.eval_max_len
+        val_tok = val_ds.map(
+            lambda ex: tokenize_fn(processor, ex, eval_len),
+            remove_columns=val_ds.column_names,
+            desc="Tokenizing val",
+        )
+    else:
+        val_tok = None
 
     collator = CausalLMPadCollator(pad_token_id=pad_id)
 
-    eval_strategy = "epoch" if args.eval_steps == 0 else "steps"
+    eval_strategy = "no" if args.no_eval else ("epoch" if args.eval_steps == 0 else "steps")
     save_strategy = "epoch" if args.eval_steps == 0 else "steps"
 
     steps_per_epoch = math.ceil(len(train_tok) / max(1, args.batch * args.grad_accum))
@@ -487,13 +487,12 @@ def main():
         report_to="none",
         remove_unused_columns=False,
         group_by_length=True,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
         max_grad_norm=1.0,
         warmup_steps=warmup_steps,
+        gradient_checkpointing=True,
     )
 
+    # ---- Eval/Save strategy kw compat ----
     if _supports_trainingargs_kw(TrainingArguments, "eval_strategy"):
         ta_kwargs["eval_strategy"] = eval_strategy
     else:
@@ -502,9 +501,28 @@ def main():
     if _supports_trainingargs_kw(TrainingArguments, "save_strategy"):
         ta_kwargs["save_strategy"] = save_strategy
 
-    if args.eval_steps != 0:
-        ta_kwargs["eval_steps"] = args.eval_steps
-        ta_kwargs["save_steps"] = args.eval_steps
+    # ---- Eval memory reducers (only if eval is enabled) ----
+    if not args.no_eval:
+        if _supports_trainingargs_kw(TrainingArguments, "per_device_eval_batch_size"):
+            ta_kwargs["per_device_eval_batch_size"] = 1
+
+        if _supports_trainingargs_kw(TrainingArguments, "fp16_full_eval"):
+            ta_kwargs["fp16_full_eval"] = (compute_dtype == torch.float16)
+        if _supports_trainingargs_kw(TrainingArguments, "bf16_full_eval"):
+            ta_kwargs["bf16_full_eval"] = (compute_dtype == torch.bfloat16)
+
+        if _supports_trainingargs_kw(TrainingArguments, "prediction_loss_only"):
+            ta_kwargs["prediction_loss_only"] = True
+
+        ta_kwargs["load_best_model_at_end"] = True
+        ta_kwargs["metric_for_best_model"] = "eval_loss"
+        ta_kwargs["greater_is_better"] = False
+
+        if args.eval_steps != 0:
+            ta_kwargs["eval_steps"] = args.eval_steps
+            ta_kwargs["save_steps"] = args.eval_steps
+    else:
+        ta_kwargs["load_best_model_at_end"] = False
 
     train_args = TrainingArguments(**ta_kwargs)
 
@@ -516,16 +534,7 @@ def main():
         data_collator=collator,
     )
 
-    # Preflight: ensure token_type_ids is in batch
-    try:
-        one = next(iter(trainer.get_train_dataloader()))
-        if "token_type_ids" not in one:
-            raise RuntimeError("token_type_ids missing from batch (Gemma3 requires it).")
-        print("Batch keys:", list(one.keys()))
-    except Exception as e:
-        print("[warn] Could not preflight dataloader keys:", repr(e))
-
-    # Final force-disable just before training (belt + suspenders)
+    # Final force-disable just before training (in case anything toggled)
     force_disable_use_cache_everywhere(trainer.model)
 
     print_gpu_mem("[before train] ")
