@@ -4,10 +4,10 @@
 [Bernard] logs Heystek❌
 physionet2012
 	apps
-		[Charlene] Mobile❌ dart flutter
-		[Charlene] Web❌ react no hosting needed
-		[Charlene] Desktop❌html css javascript ionic electron
-	[Charlene&Bernard] Backend❌ FastAPI
+		[Bernard] Mobile❌ dart flutter
+		[Bernard] Web❌ react no hosting needed
+		[Bernard] Desktop❌html css javascript electron
+	[Bernard] Backend❌ FastAPI
 	[Bernard] dataset✅
 	[Bernard] dataset_scripts✅
 	[Bernard] model_evaluation✅
@@ -20,7 +20,7 @@ physionet2019
 		[Charlene] Mobile❌
 		[Charlene] Web❌
 		[Charlene] Desktop❌
-	[Charlene&Bernard] Backend❌
+	[Charlene] Backend❌
 	[Bernard] dataset✅
 	[Bernard] dataset_scripts✅
 	[Bernard] model_evaluation❌ 
