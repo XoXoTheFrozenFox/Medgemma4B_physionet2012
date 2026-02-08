@@ -1,4 +1,7 @@
 [Charlene&Bernard] Format readme.md❌
+[Charlene&Bernard] documentation and architecture graph❌ 
+[Charlene] video❌
+[Bernard] logs Heystek❌
 physionet2012
 	apps
 		[Charlene] Mobile❌ dart flutter
@@ -7,8 +10,7 @@ physionet2012
 	[Charlene&Bernard] Backend❌ FastAPI
 	[Bernard] dataset✅
 	[Bernard] dataset_scripts✅
-	[Charlene&Bernard] documentation❌ 
-	[Bernard] model_evaluation❌ 
+	[Bernard] model_evaluation✅
 	[Bernard] model_notebooks✅ 
 	[Bernard] model_scripts ✅
 	[Bernard] results ✅
@@ -21,7 +23,6 @@ physionet2019
 	[Charlene&Bernard] Backend❌
 	[Bernard] dataset✅
 	[Bernard] dataset_scripts✅
-	[Charlene&Bernard] documentation❌ 
 	[Bernard] model_evaluation❌ 
 	[Bernard] model_notebooks✅ 
 	[Bernard] model_scripts ✅

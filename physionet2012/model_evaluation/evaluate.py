@@ -258,17 +258,57 @@ def plot_training_curves(trainer_state_path: str, out_png: str):
 
 
 def plot_confusion(cm: np.ndarray, labels: List[str], out_png: str, title: str):
-    plt.figure()
-    plt.imshow(cm, interpolation="nearest")
+    """
+    Professional confusion matrix:
+    - Blue colormap (instead of default)
+    - Cell values overlaid with auto-contrasting text (white on dark, black on light)
+    - Cleaner layout and readable ticks
+    """
+    cm = np.asarray(cm)
+
+    # Slightly scale figure size with number of classes for readability
+    n = max(1, len(labels))
+    fig_w = min(14.0, max(6.0, 0.8 * n))
+    fig_h = min(12.0, max(5.5, 0.7 * n))
+
+    plt.figure(figsize=(fig_w, fig_h))
+
+    vmax = float(cm.max()) if cm.size else 1.0
+    im = plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues, vmin=0.0, vmax=vmax)
+
     plt.title(title)
-    plt.colorbar()
+    cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=9)
+
     tick_marks = np.arange(len(labels))
     plt.xticks(tick_marks, labels, rotation=45, ha="right")
     plt.yticks(tick_marks, labels)
     plt.xlabel("pred")
     plt.ylabel("true")
+
+    # Annotate cells
+    # Threshold for text color switching
+    thresh = vmax * 0.55 if vmax > 0 else 0.0
+
+    # Use slightly smaller font for large matrices
+    font_size = 10 if n <= 8 else 8 if n <= 14 else 6
+
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            val = cm[i, j]
+            txt_color = "white" if val >= thresh else "black"
+            plt.text(
+                j,
+                i,
+                f"{int(val)}",
+                ha="center",
+                va="center",
+                color=txt_color,
+                fontsize=font_size,
+            )
+
     plt.tight_layout()
-    plt.savefig(out_png, dpi=180)
+    plt.savefig(out_png, dpi=220)
     plt.close()
 
 
