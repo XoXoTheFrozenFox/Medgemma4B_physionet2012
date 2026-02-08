@@ -4,5 +4,5 @@
 </div>
  <!--  
  <img src="https://skillicons.dev/icons?i=github,anaconda,python,sklearn,pytorch,fastapi,powershell,bash,windows,linux,dart" />
-    <img src="https://skillicons.dev/icons?i=flutter,gradle,npm,nodejs,html,css,javascript,typescript,react,electron,latex,vscode,androidstudio" />
+    <img src="https://skillicons.dev/icons?i=flutter,gradle,npm,nodejs,html,css,javascript,typescript,react,electron,vite,latex,vscode,androidstudio" />
     -->
