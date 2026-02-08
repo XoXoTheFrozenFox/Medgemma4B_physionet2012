@@ -1,7 +1,9 @@
-*.tex linguist-detectable=true linguist-language=TeX -linguist-documentation -linguist-vendored -linguist-generated
-
-# Treat everything under /documentation as NOT “documentation” for stats (recursive)
-documentation/** -linguist-documentation
-
-# Make sure TeX files in that folder are counted and classified as TeX
-documentation/**/*.tex linguist-detectable=true linguist-language=TeX
+# -----------------------------
+# Count frontend code in stats
+# -----------------------------
+*.ts   linguist-detectable=true linguist-language=TypeScript -linguist-documentation -linguist-vendored -linguist-generated
+*.tsx  linguist-detectable=true linguist-language=TypeScript -linguist-documentation -linguist-vendored -linguist-generated
+*.js   linguist-detectable=true linguist-language=JavaScript -linguist-documentation -linguist-vendored -linguist-generated
+*.jsx  linguist-detectable=true linguist-language=JavaScript -linguist-documentation -linguist-vendored -linguist-generated
+*.html linguist-detectable=true linguist-language=HTML       -linguist-documentation -linguist-vendored -linguist-generated
+*.css  linguist-detectable=true linguist-language=CSS        -linguist-documentation -linguist-vendored -linguist-generated
