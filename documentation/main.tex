@@ -1,0 +1,267 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=0.75in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=*,noitemsep,topsep=2pt}
+\setlength{\columnsep}{0.22in}
+
+\title{\vspace{-0.5em}\bf ICU ``What's Getting Worse?'' Copilot: Offline Trend Summarization with MedGemma 27B + QLoRA on PhysioNet 2012\vspace{-0.4em}}
+\author{Team: \textit{[Your Team Name]} \quad Contact: \textit{[email]} \quad Repo: \textit{[GitHub URL]}}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-0.8em}
+
+\begin{abstract}
+ICU clinicians must continuously interpret streams of vitals and labs. The cognitive burden is high, trend interpretation is repetitive, and deterioration signals may be missed when data are fragmented across screens. We present an offline ``trend summarizer'' copilot that converts the last 12 hours of measurements into a concise deterioration narrative with supporting evidence and suggested checks. The system uses MedGemma 27B (text-only instruction-tuned) adapted via 4-bit QLoRA on a public ICU dataset (PhysioNet/CinC Challenge 2012). A lightweight Streamlit interface provides human-centered summaries, explicitly flags missing data, and outputs strict JSON for downstream integration. This demonstration targets privacy-constrained clinical environments by enabling local inference on a single 24GB GPU.
+\end{abstract}
+
+\vspace{-0.6em}
+\section{Problem \& Unmet Need}
+ICU care requires rapid synthesis of evolving physiology. Clinicians often review the same variables (e.g., blood pressure, oxygenation, lactate, creatinine) to answer: \emph{Is the patient getting worse, why, and what should I verify next?} In practice, vitals/labs are distributed across multiple views, and trend interpretation is time-consuming and error-prone. Closed models are frequently unsuitable due to connectivity requirements and privacy constraints.
+
+\textbf{Goal.} Build a human-centered, offline-capable copilot that:
+\vspace{-0.2em}
+\begin{itemize}
+  \item summarizes the \textbf{last 12h} trends into an actionable narrative,
+  \item provides \textbf{evidence} (key numbers/trends),
+  \item suggests \textbf{what to check next} (not prescriptions),
+  \item avoids hallucination by acknowledging missing data,
+  \item returns \textbf{strict JSON} to support EHR integration.
+\end{itemize}
+
+\section{Users \& Human-Centered Design}
+\textbf{Primary users:} bedside ICU clinicians (physicians, nurses, advanced practitioners). \textbf{Secondary users:} charge nurses and rapid response teams who need quick deterioration signals.
+
+\textbf{Design choices.}
+\vspace{-0.3em}
+\begin{itemize}
+  \item \textbf{Structured output:} strict JSON keys \texttt{status}, \texttt{drivers}, \texttt{what\_to\_check\_next}, \texttt{evidence}, \texttt{narrative}, \texttt{disclaimer}.
+  \item \textbf{Evidence-first:} numeric values and trend slopes appear in the evidence list.
+  \item \textbf{Uncertainty:} ``NA'' is preserved; the model is instructed not to infer missing measurements.
+  \item \textbf{Human-in-the-loop:} the UI displays raw output + parsed JSON, enabling clinician editing/copying into notes.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/ui_screenshot_placeholder.png}
+  \caption{(\textbf{Placeholder}) Streamlit UI: paste a 12h feature summary, generate strict JSON + narrative, and review evidence/missing data.}
+  \label{fig:ui}
+\vspace{-0.8em}
+\end{figure}
+
+\section{Data: Public ICU Dataset (PhysioNet 2012)}
+We use the PhysioNet/CinC Challenge 2012 training set (public). Each patient record is a time-stamped table of ICU measurements (timestamp, parameter, value). We focus on a subset of common vitals and labs present in the dataset (e.g., HR, MAP, SBP/DBP, RR, temperature, oxygenation proxy, lactate, creatinine, WBC, ABG-related variables when available).
+
+\textbf{Why this dataset?} It is publicly accessible and provides realistic irregular sampling patterns found in ICUs, enabling a compelling demo without credentialed datasets.
+
+\section{System Overview}
+Figure~\ref{fig:pipeline} summarizes the end-to-end pipeline.
+
+\textbf{Model artifacts created.}
+\vspace{-0.3em}
+\begin{itemize}
+  \item \textbf{Weak-supervision labeler (rules):} generates pseudo-label JSON targets from trend features (``stable'' vs ``worsening'' + driver tags).
+  \item \textbf{MedGemma 27B QLoRA adapter:} a fine-tuned LoRA adapter trained to emit strict JSON summaries from trend features.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/pipeline_placeholder.png}
+  \caption{(\textbf{Placeholder}) Pipeline: PhysioNet 2012 $\rightarrow$ long-format CSV $\rightarrow$ 12h windows $\rightarrow$ trend features $\rightarrow$ prompt/target JSONL $\rightarrow$ MedGemma 27B QLoRA fine-tuning $\rightarrow$ offline inference in Streamlit.}
+  \label{fig:pipeline}
+\vspace{-0.9em}
+\end{figure}
+
+\section{Preprocessing \& Window Featurization}
+\textbf{Conversion.} We convert per-patient text files into a single long-format CSV:
+\[
+(\texttt{stay\_id}, \texttt{ts}, \texttt{var}, \texttt{value}, \texttt{unit})
+\]
+This simplifies sampling and windowing.
+
+\textbf{12h windows.} For each patient, we slide a 12-hour window with a 6-hour stride (configurable). For each variable, we compute:
+\vspace{-0.4em}
+\begin{itemize}
+  \item last value, min, max, mean, and
+  \item linear slope per hour (least-squares) over the window.
+\end{itemize}
+
+The resulting ``window text'' is a compact, model-friendly representation, e.g.:
+\small
+\begin{verbatim}
+MAP: last=61, min=58, max=74, mean=66, slope_hr=-0.09
+Lactate: last=2.8, min=1.5, max=3.0, mean=2.3, slope_hr=0.04
+...
+\end{verbatim}
+\normalsize
+
+\section{Weak Supervision Targets (Demo Labels)}
+Clinical-grade labels for deterioration narratives are rarely available. For a hackathon-grade demonstration, we generate pseudo-labels using transparent heuristics:
+\vspace{-0.4em}
+\begin{itemize}
+  \item \textbf{Hemodynamic concern:} MAP $<$ 65 and/or lactate $>$ 2.0.
+  \item \textbf{Respiratory concern:} low oxygenation proxy and/or elevated RR.
+  \item \textbf{Renal concern:} rising creatinine slope or elevated creatinine.
+  \item \textbf{Infection/inflammation concern:} abnormal WBC and/or fever.
+\end{itemize}
+These rules populate \texttt{drivers}, \texttt{evidence}, and \texttt{what\_to\_check\_next}. The objective is not clinical decision support but a reproducible prototype that demonstrates how MedGemma can be adapted to ICU trend summarization.
+
+\section{Model Adaptation with MedGemma 27B (QLoRA)}
+\textbf{Base model.} MedGemma 27B text-only instruction-tuned model.
+
+\textbf{Fine-tuning.} We perform parameter-efficient fine-tuning with QLoRA:
+\vspace{-0.4em}
+\begin{itemize}
+  \item 4-bit NF4 quantization, double quantization,
+  \item LoRA rank $r \in \{4,8\}$ (default $r=8$),
+  \item gradient checkpointing enabled,
+  \item training on a single 24GB GPU with gradient accumulation.
+\end{itemize}
+
+\textbf{Prompting.} Each training example includes an instruction to output \emph{strict JSON} and to avoid inventing missing data. We train as causal LM where the target JSON is the assistant message.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Setting & Value (default) \\
+\midrule
+Window length / stride & 12h / 6h \\
+Max sequence length & 512 (fallback 384) \\
+Batch size & 1 \\
+Grad accumulation & 16 (fallback 32) \\
+LoRA rank / alpha & 8 / 16 \\
+Quantization & 4-bit NF4 \\
+Epochs & 1+ (demo) \\
+\bottomrule
+\end{tabular}
+\caption{Training configuration (tuned for 24GB VRAM). Replace with your final settings.}
+\label{tab:traincfg}
+\vspace{-0.9em}
+\end{table}
+
+\section{Evaluation: Metrics \& Graphs}
+We evaluate on held-out patient stays (split by \texttt{stay\_id} to avoid leakage). Because the task is structured generation, we report:
+\vspace{-0.5em}
+\begin{itemize}
+  \item \textbf{JSON parse rate:} fraction of outputs parsed as valid JSON.
+  \item \textbf{Status accuracy:} accuracy on \texttt{status} (e.g., stable vs worsening).
+  \item \textbf{Drivers F1 (set-F1):} overlap between predicted and target \texttt{drivers}.
+  \item \textbf{Checks F1 (set-F1):} overlap for \texttt{what\_to\_check\_next}.
+  \item \textbf{Narrative ROUGE-L:} similarity of generated vs target narrative text.
+\end{itemize}
+
+\textbf{Graphs produced by our codebase (placeholders below).}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/training_loss_placeholder.png}
+  \caption{(\textbf{Placeholder}) Training/eval loss curve from \texttt{trainer\_state.json}.}
+  \label{fig:loss}
+\vspace{-0.9em}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/status_confusion_placeholder.png}
+  \caption{(\textbf{Placeholder}) Confusion matrix for \texttt{status} on validation samples.}
+  \label{fig:cm}
+\vspace{-0.9em}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/metrics_bar_placeholder.png}
+  \caption{(\textbf{Placeholder}) Key validation metrics: JSON parse rate, status accuracy, drivers/checks set-F1, narrative ROUGE-L.}
+  \label{fig:metrics}
+\vspace{-0.9em}
+\end{figure}
+
+\textbf{Results (fill with your numbers).} Table~\ref{tab:results} is a compact summary to update after running evaluation.
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Metric & Value \\
+\midrule
+JSON parse rate & [\_\_\_] \\
+Status accuracy & [\_\_\_] \\
+Drivers F1 (mean) & [\_\_\_] \\
+Checks F1 (mean) & [\_\_\_] \\
+ROUGE-L narrative (mean) & [\_\_\_] \\
+\bottomrule
+\end{tabular}
+\caption{Validation metrics (replace placeholders with \texttt{reports/metrics.json}).}
+\label{tab:results}
+\vspace{-0.9em}
+\end{table}
+
+\section{Product Feasibility \& Deployment}
+\textbf{Offline inference.} The Streamlit demo loads MedGemma 27B in 4-bit with the QLoRA adapter. This supports local, privacy-preserving inference on a single GPU. The UI is intentionally minimal: clinicians paste a 12h window summary (or an upstream extractor can supply it), click ``Generate,'' and receive strict JSON plus a readable narrative.
+
+\textbf{Integration path.} Because outputs are structured JSON, downstream systems can:
+\vspace{-0.5em}
+\begin{itemize}
+  \item log summaries to clinical notes,
+  \item trigger ``review'' flags when \texttt{status=worsening},
+  \item store \texttt{evidence} for auditability.
+\end{itemize}
+
+\section{Safety, Ethics, \& Limitations}
+This is \textbf{not} medical advice and must not be used as an autonomous clinical decision maker. Key safety measures:
+\vspace{-0.5em}
+\begin{itemize}
+  \item Mandatory \texttt{disclaimer} field in every output.
+  \item Instruction to avoid inventing missing measurements.
+  \item Evidence list to ground conclusions in observed trends.
+  \item Human-in-the-loop UI that displays raw output and parsed JSON for review.
+\end{itemize}
+
+\textbf{Limitations.} (1) Pseudo-labels are rule-based and may not reflect true clinical deterioration. (2) Dataset coverage is limited and older. (3) Mapping of oxygenation variables is approximate when only certain measures exist. (4) Model outputs can still fail JSON formatting; parse-rate is explicitly measured.
+
+\section{Impact Potential \& Next Steps}
+If validated in a clinical workflow, a trend summarizer could reduce time spent on routine trend interpretation and improve situational awareness during handoffs/rounds. Next steps:
+\vspace{-0.5em}
+\begin{itemize}
+  \item Replace weak labels with clinician-rated summaries (small curated set).
+  \item Add more temporal grounding (e.g., ``at 03:00 MAP fell to 58'').
+  \item Calibrate conservative language and uncertainty.
+  \item Evaluate on credentialed ICU datasets (e.g., MIMIC/eICU) where permitted.
+\end{itemize}
+
+\vspace{-0.2em}
+\section*{Reproducibility Checklist}
+\vspace{-0.5em}
+\begin{itemize}
+  \item Data download: PhysioNet 2012 training set A.
+  \item Conversion: \texttt{physionet2012\_to\_icu\_long.py} $\rightarrow$ \texttt{data/icu\_long.csv}.
+  \item Dataset build: \texttt{make\_dataset.py} $\rightarrow$ \texttt{train.jsonl}, \texttt{val.jsonl}.
+  \item Training: \texttt{train\_qlora.py} (MedGemma 27B, 4-bit QLoRA).
+  \item Evaluation/figures: \texttt{evaluate.py} $\rightarrow$ \texttt{reports/}.
+  \item Demo: \texttt{app\_streamlit.py}.
+\end{itemize}
+
+\vspace{-0.4em}
+\begin{thebibliography}{9}\small
+\bibitem{medgemma_modelcard}
+MedGemma Model Card. \emph{Google Health AI Developer Foundations}. [Accessed: \textit{insert date}].
+
+\bibitem{kaggle_medgemma_challenge}
+The MedGemma Impact Challenge. \emph{Kaggle Competition Page}. [Accessed: \textit{insert date}].
+
+\bibitem{physionet2012}
+PhysioNet/CinC Challenge 2012: Predicting In-Hospital Mortality of ICU Patients. \emph{PhysioNet}. [Accessed: \textit{insert date}].
+
+\bibitem{silva2012}
+Silva I., et al. Predicting In-Hospital Mortality of ICU Patients: The PhysioNet/Computing in Cardiology Challenge 2012. \emph{Computing in Cardiology}, 2012.
+\end{thebibliography}
+
+\end{document}
