@@ -1,2 +1,2 @@
-*.jsonl   linguist-vendored
-*.ndjson  linguist-vendored
+*.json   linguist-vendored
+*.ipynb  linguist-vendored
