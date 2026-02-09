@@ -44,6 +44,17 @@ async function httpPostJson(url: string, body: any, timeoutMs = 240000) {
   }
 }
 
+function stripAngleTags(s: string): string {
+  if (!s) return "";
+  return s
+    // remove wrapper tags like <BL> </BL> <Answer> </Answer> <end_of_turn> etc
+    .replace(/<\/?[^>]+>/g, "")
+    // optional: collapse big blank gaps
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+
 export default function App() {
   const [preset, setPreset] = useState<Preset>("quick");
   const [note, setNote] = useState<string>(SAMPLE_NOTE);
@@ -107,7 +118,7 @@ export default function App() {
         return;
       }
 
-      setReply(String(res.data?.reply ?? ""));
+      setReply(stripAngleTags(String(res.data?.reply ?? "")));
       setMeta(res.data?.meta ?? null);
     } catch (e: any) {
       setError(e?.name === "AbortError" ? "Request timed out." : (e?.message || String(e)));

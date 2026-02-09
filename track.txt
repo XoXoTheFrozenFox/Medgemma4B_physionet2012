@@ -5,7 +5,7 @@
 physionet2012
 	apps
 		[Bernard] Mobile❌ 
-		[Bernard] Web❌ 
+		[Bernard] Web✅ 
 		[Bernard] Desktop✅
 	[Bernard] Backend✅
 	[Bernard] dataset✅
