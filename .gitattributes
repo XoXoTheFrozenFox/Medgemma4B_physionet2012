@@ -1,9 +1,35 @@
-# -----------------------------
-# Count frontend code in stats
-# -----------------------------
-*.ts   linguist-detectable=true linguist-language=TypeScript -linguist-documentation -linguist-vendored -linguist-generated
-*.tsx  linguist-detectable=true linguist-language=TypeScript -linguist-documentation -linguist-vendored -linguist-generated
-*.js   linguist-detectable=true linguist-language=JavaScript -linguist-documentation -linguist-vendored -linguist-generated
-*.jsx  linguist-detectable=true linguist-language=JavaScript -linguist-documentation -linguist-vendored -linguist-generated
-*.html linguist-detectable=true linguist-language=HTML       -linguist-documentation -linguist-vendored -linguist-generated
-*.css  linguist-detectable=true linguist-language=CSS        -linguist-documentation -linguist-vendored -linguist-generated
+# ------------------------------------------------------------
+# Make source files count toward GitHub language stats
+# (even if they live under docs/, examples/, etc.)
+# ------------------------------------------------------------
+
+# Web / Frontend
+*.ts    linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.tsx   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.js    linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.jsx   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.html  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.css   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.scss  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+
+# Python / Notebooks
+*.py     linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.ipynb  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+
+# Flutter / Dart
+*.dart  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+
+# Shell / PowerShell
+*.sh    linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.bash  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.zsh   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.ps1   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+
+# Config / Infra
+Dockerfile        linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.dockerfile      linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.yml             linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.yaml            linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.json            linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.toml            linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+*.ini             linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
