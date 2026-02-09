@@ -13,6 +13,10 @@
 #     * detect when preset output is already complete (esp. quick) and STOP (even if token cap was hit)
 #     * safe overlap trimming + "already included" suppression
 # - Optional debug: meta.previews + token previews
+#
+# ADDED (no changes to your working flow):
+# - PEFT adapter sanity checks on load (is_peft, active adapter, lora param count, lora norm, example keys)
+# - Expose adapter sanity info in /health under "adapter"
 # ------------------------------------------------------------
 
 import argparse
@@ -291,6 +295,9 @@ class ModelServer:
         # generation bans
         self.bad_words_ids: List[List[int]] = []
 
+        # ✅ added: adapter sanity info (so /health can show it)
+        self.adapter_info: Dict[str, Any] = {}
+
     def load(self):
         torch.backends.cuda.matmul.allow_tf32 = True
         try:
@@ -343,8 +350,52 @@ class ModelServer:
                 **model_kwargs,
             )
 
+        # ---- Load adapter ----
         self.model = PeftModel.from_pretrained(self.model, self.adapter_dir, is_trainable=False)
         self.model.eval()
+
+        # ✅ ADDED: PEFT adapter sanity checks (no changes to your generation code)
+        is_peft = isinstance(self.model, PeftModel)
+
+        # active adapter name (varies by peft version)
+        active = getattr(self.model, "active_adapter", None)
+        active_list = getattr(self.model, "active_adapters", None)
+        if active_list:
+            active = active_list
+
+        # count LoRA params + quick sample of keys
+        lora_param_names: List[str] = []
+        lora_param_count = 0
+        lora_sq_sum = 0.0
+
+        for n, p in self.model.named_parameters():
+            if "lora_" in n:  # catches lora_A / lora_B / lora_embedding etc
+                lora_param_names.append(n)
+                lora_param_count += p.numel()
+                # norm proxy (safe + cheap) - once at load
+                with torch.no_grad():
+                    lora_sq_sum += float((p.detach().float() ** 2).sum().cpu().item())
+
+        lora_norm = (lora_sq_sum ** 0.5)
+
+        print(
+            f"[PEFT] is_peft={is_peft} | active={active} | "
+            f"lora_params={lora_param_count:,} | lora_norm={lora_norm:.6f} | "
+            f"example_keys={lora_param_names[:3]}"
+        )
+
+        # store for /health
+        self.adapter_info = {
+            "is_peft": bool(is_peft),
+            "active_adapter": active,
+            "lora_param_count": int(lora_param_count),
+            "lora_norm": float(lora_norm),
+            "example_lora_keys": lora_param_names[:10],
+            "peft_config_keys": list(getattr(self.model, "peft_config", {}).keys()),
+        }
+
+        if (not is_peft) or (lora_param_count == 0):
+            raise RuntimeError("Adapter did not appear to load: no PEFT wrapper or no LoRA parameters found.")
 
         # enable cache for inference speed
         try:
@@ -386,6 +437,8 @@ class ModelServer:
             "base_model": self.base_model,
             "adapter_dir": self.adapter_dir,
             "processor_dir": self.processor_dir,
+            # ✅ added
+            "adapter": (self.adapter_info or None),
         }
 
     # -------- always 2D tensors --------
@@ -672,7 +725,7 @@ def create_app(server: ModelServer) -> FastAPI:
         server.load()
         yield
 
-    app = FastAPI(title="MedGemma QLoRA Local API", version="1.0.5", lifespan=lifespan)
+    app = FastAPI(title="MedGemma QLoRA Local API", version="1.0.6", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
