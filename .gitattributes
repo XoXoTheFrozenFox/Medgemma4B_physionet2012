@@ -1,27 +1,2 @@
-# ----------------------------
-# Reduce "Other" category
-# ----------------------------
-
-# Markdown / Docs
-*.md    linguist-detectable=true linguist-language=Markdown
-*.rst   linguist-detectable=true linguist-language=Markdown
-*.txt   linguist-detectable=true linguist-language=Text
-
-# Config files
-*.cfg   linguist-detectable=true linguist-language=INI
-*.conf  linguist-detectable=true linguist-language=INI
-*.env   linguist-detectable=true linguist-language=INI
-
-# Logs (usually don't want counted, so ignore)
-*.log   linguist-vendored
-
-# CSV / Data
-*.csv   linguist-detectable=true linguist-language=CSV
-*.tsv   linguist-detectable=true linguist-language=TSV
-
-# SQL
-*.sql   linguist-detectable=true linguist-language=SQL
-
-# C / C++ headers (often end up as Other)
-*.h     linguist-detectable=true linguist-language=C++
-*.hpp   linguist-detectable=true linguist-language=C++
+*.jsonl   linguist-vendored
+*.ndjson  linguist-vendored
