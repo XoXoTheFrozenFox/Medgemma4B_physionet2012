@@ -1,35 +1,27 @@
-# ------------------------------------------------------------
-# Make source files count toward GitHub language stats
-# (even if they live under docs/, examples/, etc.)
-# ------------------------------------------------------------
+# ----------------------------
+# Reduce "Other" category
+# ----------------------------
 
-# Web / Frontend
-*.ts    linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.tsx   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.js    linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.jsx   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.html  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.css   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.scss  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+# Markdown / Docs
+*.md    linguist-detectable=true linguist-language=Markdown
+*.rst   linguist-detectable=true linguist-language=Markdown
+*.txt   linguist-detectable=true linguist-language=Text
 
-# Python / Notebooks
-*.py     linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.ipynb  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+# Config files
+*.cfg   linguist-detectable=true linguist-language=INI
+*.conf  linguist-detectable=true linguist-language=INI
+*.env   linguist-detectable=true linguist-language=INI
 
-# Flutter / Dart
-*.dart  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+# Logs (usually don't want counted, so ignore)
+*.log   linguist-vendored
 
-# Shell / PowerShell
-*.sh    linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.bash  linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.zsh   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.ps1   linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+# CSV / Data
+*.csv   linguist-detectable=true linguist-language=CSV
+*.tsv   linguist-detectable=true linguist-language=TSV
 
-# Config / Infra
-Dockerfile        linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.dockerfile      linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.yml             linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.yaml            linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.json            linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.toml            linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
-*.ini             linguist-detectable=true -linguist-documentation -linguist-vendored -linguist-generated
+# SQL
+*.sql   linguist-detectable=true linguist-language=SQL
+
+# C / C++ headers (often end up as Other)
+*.h     linguist-detectable=true linguist-language=C++
+*.hpp   linguist-detectable=true linguist-language=C++
