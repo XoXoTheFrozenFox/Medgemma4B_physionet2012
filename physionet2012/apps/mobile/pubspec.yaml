@@ -1,0 +1,56 @@
+name: llm_medgemma
+description: "A new Flutter project."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.8
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  shared_preferences: ^2.2.3
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+  # Splash screen generator
+  flutter_native_splash: ^2.4.1
+
+  # App launcher icon generator
+  flutter_launcher_icons: ^0.14.1
+
+flutter:
+  uses-material-design: true
+  assets:
+  - assets/images/logo.jpg
+
+# -----------------------------
+# Splash screen (background #030305 + centered logo)
+# -----------------------------
+flutter_native_splash:
+  color: "#030305"
+  image: assets/images/logo.jpg
+  android: true
+  ios: true
+
+  # Android 12+ uses a different splash system
+  android_12:
+    color: "#030305"
+    image: assets/images/logo.jpg
+
+# -----------------------------
+# App launcher icon (Android + iOS)
+# -----------------------------
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/logo.jpg"
+
+  # Android adaptive icon (recommended)
+  adaptive_icon_background: "#030305"
+  adaptive_icon_foreground: "assets/images/logo.jpg"

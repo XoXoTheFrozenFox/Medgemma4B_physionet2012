@@ -1,0 +1,22 @@
+LAST_12H_WINDOW:
+HR: last=46.000, min=38.000, max=62.000, mean=48.500, slope_hr=-1.100
+MAP: last=64.000, min=52.000, max=74.000, mean=61.000, slope_hr=-0.500
+SBP: last=92.000, min=78.000, max=108.000, mean=90.500, slope_hr=-0.700
+DBP: last=50.000, min=40.000, max=64.000, mean=49.200, slope_hr=-0.400
+RR: last=10.000, min=8.000, max=18.000, mean=12.200, slope_hr=-0.250
+SpO2: last=98.000, min=95.000, max=100.000, mean=98.600, slope_hr=0.050
+TempC: last=36.100, min=35.700, max=36.600, mean=36.200, slope_hr=-0.020
+Lactate: last=1.300, min=1.100, max=2.000, mean=1.450, slope_hr=-0.080
+Creatinine: last=1.100, min=0.900, max=1.200, mean=1.050, slope_hr=0.020
+WBC: last=9.800, min=7.900, max=10.400, mean=9.200, slope_hr=0.040
+pH: last=7.210, min=7.200, max=7.330, mean=7.270, slope_hr=-0.030
+PaO2: last=84.000, min=74.000, max=98.000, mean=86.000, slope_hr=-0.600
+PaCO2: last=72.000, min=58.000, max=72.000, mean=65.500, slope_hr=1.200
+Na: last=138.000, min=136.000, max=140.000, mean=138.200, slope_hr=0.020
+K: last=4.200, min=3.600, max=4.700, mean=4.150, slope_hr=0.060
+Glucose: last=118.000, min=92.000, max=148.000, mean=121.000, slope_hr=-0.300
+
+CONTEXT:
+72F found somnolent with shallow breathing after receiving opioids for post-op pain control 6 hours ago (hydromorphone dose unclear).
+Pupils reportedly pinpoint. End-tidal CO2 rising; ABG shows hypercapnia with acidemia. SpO2 preserved on 2L nasal cannula.
+No known drug allergies. Concern for opioid-induced hypoventilation vs COPD/OSA overlap; consider naloxone and airway support.

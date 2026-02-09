@@ -1,0 +1,22 @@
+LAST_12H_WINDOW:
+HR: last=112.000, min=108.000, max=118.000, mean=113.500, slope_hr=0.450
+MAP: last=74.000, min=68.000, max=78.000, mean=72.000, slope_hr=-0.120
+SBP: last=98.000, min=92.000, max=104.000, mean=97.000, slope_hr=-0.200
+DBP: last=62.000, min=58.000, max=66.000, mean=61.000, slope_hr=-0.050
+RR: last=32.000, min=26.000, max=34.000, mean=30.200, slope_hr=0.600
+SpO2: last=92.000, min=88.000, max=93.000, mean=91.000, slope_hr=-0.150
+TempC: last=38.400, min=37.900, max=38.600, mean=38.250, slope_hr=0.080
+Lactate: last=2.400, min=2.100, max=2.400, mean=2.250, slope_hr=0.120
+Creatinine: last=1.900, min=1.700, max=1.900, mean=1.800, slope_hr=0.150
+WBC: last=18.700, min=17.900, max=18.700, mean=18.300, slope_hr=0.100
+pH: last=7.310, min=7.300, max=7.320, mean=7.310, slope_hr=0.010
+PaO2: last=62.000, min=60.000, max=68.000, mean=64.000, slope_hr=-0.200
+PaCO2: last=58.000, min=55.000, max=60.000, mean=57.500, slope_hr=0.150
+Na: last=NA, min=NA, max=NA, mean=NA, slope_hr=NA
+K: last=NA, min=NA, max=NA, mean=NA, slope_hr=NA
+Glucose: last=NA, min=NA, max=NA, mean=NA, slope_hr=NA
+
+CONTEXT:
+68M COPD + HTN. SpO2 reported 86% on room air -> 92% on 4L nasal cannula.
+Exam: diffuse wheeze, crackles RLL, accessory muscle use.
+CRP 160. CXR: RLL consolidation. No known drug allergies.

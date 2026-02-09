@@ -36,7 +36,10 @@ function resolveAsset(relPath) {
     `[electron] resolveAsset("${relPath}") candidates:
 ` + candidates.map((c) => "  " + c).join("\n")
   );
-  console.log(`[electron] resolveAsset("${relPath}") resolved:`, found ?? "(NOT FOUND)");
+  console.log(
+    `[electron] resolveAsset("${relPath}") resolved:`,
+    found ?? "(NOT FOUND)"
+  );
   return found ?? candidates[0];
 }
 function resolvePreloadPath() {
@@ -134,20 +137,14 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
-function withTimeout(ms) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
-  return { controller, cancel: () => clearTimeout(id) };
-}
 ipcMain.handle("medapi:health", async () => {
   const base = process.env.MEDAPI_BASE_URL || DEFAULT_API_BASE;
-  const { controller, cancel } = withTimeout(15e3);
   try {
-    const r = await fetch(`${base}/health`, { signal: controller.signal });
+    const r = await fetch(`${base}/health`);
     if (!r.ok) throw new Error(`Health HTTP ${r.status}`);
     return await r.json();
-  } finally {
-    cancel();
+  } catch (e) {
+    return { ok: false, error: (e == null ? void 0 : e.message) || String(e) };
   }
 });
 ipcMain.handle("medapi:analyze", async (_evt, payload) => {
@@ -165,22 +162,17 @@ ipcMain.handle("medapi:analyze", async (_evt, payload) => {
     top_p: payload.top_p ?? void 0,
     repetition_penalty: payload.repetition_penalty ?? void 0
   };
-  const { controller, cancel } = withTimeout(24e4);
   try {
     const r = await fetch(`${base}/v1/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal
+      body: JSON.stringify(body)
     });
     const text = await r.text();
     if (!r.ok) return { ok: false, error: `HTTP ${r.status}: ${text}` };
     const json = JSON.parse(text);
     return { ok: true, data: json };
   } catch (e) {
-    const msg = (e == null ? void 0 : e.name) === "AbortError" ? "Request timed out." : (e == null ? void 0 : e.message) || String(e);
-    return { ok: false, error: msg };
-  } finally {
-    cancel();
+    return { ok: false, error: (e == null ? void 0 : e.message) || String(e) };
   }
 });

@@ -1,0 +1,21 @@
+34F in ICU after asthma exacerbation, improving over the last shift.
+
+Recent (last 6h):
+- Vitals improving: HR 112→88, RR 28→18, BP stable ~118/72 (MAP ~90), afebrile (Temp ~36.8)
+- SpO2 92→97 on low O2 (nasal cannula 2 L or FiO2 ~0.28–0.30)
+- Breathing effort reduced; speaking full sentences
+
+Labs/ABG:
+- WBC 9.4
+- Lactate 1.1
+- ABG: pH 7.40, PaCO2 40, PaO2 92 (on low O2)
+
+I/O: urine output adequate.
+Tx: bronchodilators q4h, steroids started yesterday, no pressors/antibiotics.
+
+Task: Use this exact format:
+Status: STABLE | WORSENING | UNCERTAIN
+Why: 1–3 short bullets (facts only)
+Immediate Actions: 2–5 bullets
+Red Flags: 0–5 bullets
+Missing Data: bullets only if UNCERTAIN or low confidence

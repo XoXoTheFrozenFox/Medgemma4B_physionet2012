@@ -58,7 +58,10 @@ function resolveAsset(relPath: string): string {
     `[electron] resolveAsset("${relPath}") candidates:\n` +
       candidates.map((c) => "  " + c).join("\n")
   );
-  console.log(`[electron] resolveAsset("${relPath}") resolved:`, found ?? "(NOT FOUND)");
+  console.log(
+    `[electron] resolveAsset("${relPath}") resolved:`,
+    found ?? "(NOT FOUND)"
+  );
 
   return found ?? candidates[0];
 }
@@ -187,21 +190,15 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-function withTimeout(ms: number) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
-  return { controller, cancel: () => clearTimeout(id) };
-}
-
 ipcMain.handle("medapi:health", async () => {
   const base = process.env.MEDAPI_BASE_URL || DEFAULT_API_BASE;
-  const { controller, cancel } = withTimeout(15_000);
+
   try {
-    const r = await fetch(`${base}/health`, { signal: controller.signal });
+    const r = await fetch(`${base}/health`);
     if (!r.ok) throw new Error(`Health HTTP ${r.status}`);
     return await r.json();
-  } finally {
-    cancel();
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
   }
 });
 
@@ -222,13 +219,11 @@ ipcMain.handle("medapi:analyze", async (_evt, payload: AnalyzeReq) => {
     repetition_penalty: payload.repetition_penalty ?? undefined,
   };
 
-  const { controller, cancel } = withTimeout(240_000);
   try {
     const r = await fetch(`${base}/v1/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: controller.signal,
     });
 
     const text = await r.text();
@@ -237,10 +232,6 @@ ipcMain.handle("medapi:analyze", async (_evt, payload: AnalyzeReq) => {
     const json = JSON.parse(text);
     return { ok: true, data: json };
   } catch (e: any) {
-    const msg =
-      e?.name === "AbortError" ? "Request timed out." : (e?.message || String(e));
-    return { ok: false, error: msg };
-  } finally {
-    cancel();
+    return { ok: false, error: e?.message || String(e) };
   }
 });

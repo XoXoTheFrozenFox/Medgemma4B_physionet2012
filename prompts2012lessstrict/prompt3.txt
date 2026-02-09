@@ -1,0 +1,24 @@
+76M in ICU with worsening shortness of breath overnight. Background: IHD, AF, T2DM (allergies unknown).
+Limited charting available.
+
+Most recent documented:
+- HR 110 irregular, BP 102/58 (MAP 73), RR 24, Temp 37.9, SpO2 93% on face mask 6 L
+- New confusion reported by nurse
+- Crackles bilaterally; mild leg edema
+
+Labs (8h old):
+- WBC 12.8
+- Creatinine 130 (baseline unknown)
+- No lactate result
+- No ABG result
+- No documented urine output or fluid balance
+- No CXR result recorded
+
+Tx so far: furosemide given once; antibiotics considered but not started; no cultures documented.
+
+Task: Use exact format:
+Status: STABLE | WORSENING | UNCERTAIN
+Why: 1–3 short bullets (facts only)
+Immediate Actions: 2–5 bullets
+Red Flags: 0–5 bullets
+Missing Data: bullets only if UNCERTAIN or low confidence

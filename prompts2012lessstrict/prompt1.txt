@@ -1,0 +1,22 @@
+58M in ICU, POD2 after abdominal surgery. CKD baseline creatinine ~140.
+
+Recent (last 4–6h):
+- Vitals trending worse: HR 110→132, BP 108/62→86/46 (MAP 74→60), RR 22→32, Temp 38.1→38.9
+- SpO2 95→90 despite FiO2 up to ~0.60
+- Urine output dropping: ~45→12 mL/hr
+- Mental status: more drowsy/confused (GCS ~15→13)
+
+Labs/ABG:
+- Lactate 3.1→4.2
+- WBC 19.0
+- Creatinine 210 (baseline ~140)
+- ABG (FiO2 ~0.60): pH 7.28, PaCO2 33, HCO3 16, PaO2 60
+
+Tx so far: 1 L crystalloid given; antibiotics ordered but not yet given; no vasopressors.
+
+Task: Output EXACTLY in this format:
+Status: STABLE | WORSENING | UNCERTAIN
+Why: 1–3 short bullets (facts only)
+Immediate Actions: 2–5 bullets
+Red Flags: 0–5 bullets
+Missing Data: bullets only if UNCERTAIN or low confidence

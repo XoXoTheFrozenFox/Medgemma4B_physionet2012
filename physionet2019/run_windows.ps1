@@ -53,3 +53,27 @@ python evaluate.py `
   --max_samples 100 `
   --max_new 320 `
   --run "qlora_main|C:\CODE ON GITHUB\Medgemma4B_physionet2012-2019\physionet2019\results\Qlora|qlora"
+
+conda run -n MedGemma --no-capture-output python -u .\evaluate.py `
+  --base_model "google/medgemma-1.5-4b-it" `
+  --val_jsonl "C:\CODE ON GITHUB\Medgemma4B_physionet2012-2019\physionet2019\dataset\val.jsonl" `
+  --out_dir "C:\CODE ON GITHUB\Medgemma4B_physionet2012-2019\physionet2019\results\eval_reports_qlora" `
+  --adapter_dir "C:\CODE ON GITHUB\Medgemma4B_physionet2012-2019\physionet2019\results\Qlora\checkpoint-15994" `
+  --mode qlora `
+  --task p2019_sepsis `
+  --required_keys "sepsis_label,confidence,top_factors" `
+  --max_len 1024 `
+  --max_new 256 `
+  --max_samples 200
+
+conda run -n MedGemma --no-capture-output python -u .\evaluate.py `
+>>   --base_model "google/medgemma-1.5-4b-it" `
+>>   --val_jsonl "C:\CODE ON GITHUB\Medgemma4B_physionet2012-2019\physionet2019\dataset\val.jsonl" `
+>>   --out_dir "C:\CODE ON GITHUB\Medgemma4B_physionet2012-2019\physionet2019\results\eval_reports_qlora" `
+>>   --adapter_dir "C:\CODE ON GITHUB\Medgemma4B_physionet2012-2019\physionet2019\results\Qlora\checkpoint-15994" `
+>>   --mode qlora `
+>>   --task p2019_sepsis `
+>>   --required_keys "sepsis_label,confidence,top_factors" `
+>>   --max_len 1024 `
+>>   --max_new 256 `
+>>   --max_samples 100

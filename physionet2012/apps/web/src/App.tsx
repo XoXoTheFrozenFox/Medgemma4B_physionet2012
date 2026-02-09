@@ -3,8 +3,29 @@ import { motion } from "framer-motion";
 import type { Preset } from "./api";
 import { analyze, health } from "./api";
 
-const SAMPLE_NOTE =
-  "55F, fever 39.1C, cough, RR 28, SpO2 90%, WBC 16.2, CRP 120, wheeze/coarse breath sounds RLL. CXR pending.";
+const SAMPLE_NOTE = `LAST_12H_WINDOW:
+HR: last=128.000, min=96.000, max=132.000, mean=114.500, slope_hr=1.850
+MAP: last=58.000, min=54.000, max=72.000, mean=62.000, slope_hr=-1.200
+SBP: last=86.000, min=80.000, max=110.000, mean=94.000, slope_hr=-1.600
+DBP: last=44.000, min=40.000, max=62.000, mean=50.000, slope_hr=-0.900
+RR: last=28.000, min=18.000, max=30.000, mean=23.800, slope_hr=0.700
+SpO2: last=94.000, min=92.000, max=98.000, mean=95.600, slope_hr=-0.250
+TempC: last=39.200, min=38.100, max=39.200, mean=38.700, slope_hr=0.220
+Lactate: last=4.600, min=2.900, max=4.600, mean=3.700, slope_hr=0.380
+Creatinine: last=2.300, min=1.400, max=2.300, mean=1.850, slope_hr=0.210
+WBC: last=22.100, min=16.200, max=22.100, mean=19.700, slope_hr=0.420
+pH: last=7.280, min=7.270, max=7.350, mean=7.310, slope_hr=-0.020
+PaO2: last=88.000, min=70.000, max=120.000, mean=95.000, slope_hr=-4.200
+PaCO2: last=30.000, min=28.000, max=34.000, mean=31.200, slope_hr=-0.400
+Na: last=130.000, min=130.000, max=134.000, mean=132.000, slope_hr=-0.150
+K: last=5.600, min=4.900, max=5.600, mean=5.200, slope_hr=0.120
+Glucose: last=256.000, min=180.000, max=256.000, mean=215.000, slope_hr=2.600
+
+CONTEXT:
+On norepinephrine infusion started 4 hours ago (dose unknown). Urine output reportedly decreased over last shift.
+No documented allergies. Suspected intra-abdominal source; CT pending.
+`;
+
 
 function cleanReply(s: string): string {
   if (!s) return "";
@@ -75,8 +96,8 @@ export default function App() {
         <div className="brand">
           <div className="logo">🩺</div>
           <div className="title">
-            <h1>MedGemma Clinical Console</h1>
-            <span>Local inference • Quick / Normal / Detailed • Neon red theme 🫀</span>
+            <h1>Triage Assist-SA:</h1>
+            <span>AI Clinical Decision Support For ICU Patient Care 🫀</span>
           </div>
         </div>
 

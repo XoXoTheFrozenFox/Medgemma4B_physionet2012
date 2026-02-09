@@ -16,49 +16,40 @@ export type AnalyzeResp = {
   meta?: any;
 };
 
-function withTimeout(ms: number) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
-  return { controller, cancel: () => clearTimeout(id) };
-}
-
 // We call Vite proxy endpoints (avoids CORS):
 // GET  /api/health
 // POST /api/v1/analyze
 const API = "/api";
 
 export async function health(): Promise<any> {
-  const { controller, cancel } = withTimeout(15000);
   try {
-    const r = await fetch(`${API}/health`, { signal: controller.signal });
+    const r = await fetch(`${API}/health`);
     if (!r.ok) throw new Error(`Health HTTP ${r.status}`);
     return await r.json();
-  } finally {
-    cancel();
+  } catch (e: any) {
+    // keep shape similar to other calls (optional)
+    throw new Error(e?.message || String(e));
   }
 }
 
-export async function analyze(payload: AnalyzeReq): Promise<{ ok: boolean; data?: AnalyzeResp; error?: string }> {
+export async function analyze(
+  payload: AnalyzeReq
+): Promise<{ ok: boolean; data?: AnalyzeResp; error?: string }> {
   if (!payload?.note?.trim()) return { ok: false, error: "Empty note." };
 
-  const { controller, cancel } = withTimeout(240000);
   try {
     const r = await fetch(`${API}/v1/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: controller.signal,
     });
 
     const text = await r.text();
     if (!r.ok) return { ok: false, error: `HTTP ${r.status}: ${text}` };
 
-    const json = JSON.parse(text);
+    const json = JSON.parse(text) as AnalyzeResp;
     return { ok: true, data: json };
   } catch (e: any) {
-    const msg = e?.name === "AbortError" ? "Request timed out." : (e?.message || String(e));
-    return { ok: false, error: msg };
-  } finally {
-    cancel();
+    return { ok: false, error: e?.message || String(e) };
   }
 }

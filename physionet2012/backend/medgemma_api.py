@@ -2,42 +2,60 @@
 # medgemma_api.py
 # ------------------------------------------------------------
 # Local FastAPI for MedGemma 1.5 4B IT + QLoRA adapter
-# - CUDA + 4-bit NF4 (bitsandbytes) when available
-# - 3 presets: quick / normal / detailed
-# - Correct Gemma-style inputs via apply_chat_template(tokenize=True, return_dict=True)
-# - FIX: attention_mask/input_ids ALWAYS 2D
-# - FIX: reply-empty bug:
-#     * if decoded text is empty/whitespace, auto-retry with stronger settings
-#     * optional ban of PAD/EOS from generation to avoid "all-special-token" output
-# - FIX: pass-2 duplication:
-#     * detect when preset output is already complete (esp. quick) and STOP (even if token cap was hit)
-#     * safe overlap trimming + "already included" suppression
-# - Optional debug: meta.previews + token previews
 #
-# ADDED (no changes to your working flow):
-# - PEFT adapter sanity checks on load (is_peft, active adapter, lora param count, lora norm, example keys)
-# - Expose adapter sanity info in /health under "adapter"
+# FIXES:
+# - Fix TemplateError: "Conversation roles must alternate user/assistant/..."
+#   -> Do NOT use role="system" with apply_chat_template for Gemma templates.
+#   -> Embed system instructions inside a single user message instead.
+#
+# - Strict JSON output (single object) matching your fine-tuning schema:
+#   keys: status, drivers, what_to_check_next, evidence, narrative, disclaimer
+#
+# - Remove multi-pass continuation stitching (causes "second JSON appended" + truncation issues).
+#   -> Use regenerate attempts (attempt/retry) instead.
+#
+# - Robust JSON extraction: return first valid JSON object with required keys.
+#
+# - Never ban EOS (banning EOS often leads to truncated JSON).
+#   Only ban PAD and "<unused94>thought" sequence.
+#
+# Keeps:
+# - CUDA + optional 4-bit NF4 (bitsandbytes)
+# - Presets (quick/normal/detailed)
+# - apply_chat_template(tokenize=True, return_dict=True)
+# - attention_mask/input_ids ALWAYS 2D
+# - PEFT adapter sanity info exposed in /health
 # ------------------------------------------------------------
 
 import argparse
 import asyncio
+import json
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Tuple
-from fastapi.middleware.cors import CORSMiddleware
 
 import torch
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+
 from peft import PeftModel
 
 from hf_auth import get_hf_token, try_with_token
 
 DEFAULT_BASE_MODEL = "google/medgemma-1.5-4b-it"
+
+REQUIRED_JSON_KEYS = [
+    "status",
+    "drivers",
+    "what_to_check_next",
+    "evidence",
+    "narrative",
+    "disclaimer",
+]
 
 
 # -----------------------------
@@ -52,13 +70,14 @@ class Preset:
     repetition_penalty: float
     do_sample: bool
     max_words_hint: int
-    max_passes: int
+    max_attempts: int
 
 
 PRESETS: Dict[str, Preset] = {
-    "quick": Preset("quick", 220, 0.20, 0.90, 1.05, False, 150, 2),
-    "normal": Preset("normal", 520, 0.40, 0.90, 1.08, True, 350, 3),
-    "detailed": Preset("detailed", 1100, 0.55, 0.90, 1.10, True, 900, 4),
+    # For strict JSON, deterministic is usually best; you can override temperature if desired.
+    "quick": Preset("quick", 320, 0.0, 1.0, 1.05, False, 150, 2),
+    "normal": Preset("normal", 520, 0.0, 1.0, 1.08, False, 350, 2),
+    "detailed": Preset("detailed", 900, 0.0, 1.0, 1.10, False, 900, 2),
 }
 
 
@@ -67,7 +86,10 @@ PRESETS: Dict[str, Preset] = {
 # -----------------------------
 class AnalyzeRequest(BaseModel):
     preset: Literal["quick", "normal", "detailed"] = "normal"
-    note: str = Field(..., description="Clinical note / case text to analyze.")
+    note: str = Field(
+        ...,
+        description="Input text. Ideally includes LAST_12H_WINDOW (+ optional CONTEXT).",
+    )
 
     # Optional overrides:
     max_new_tokens: Optional[int] = None
@@ -125,57 +147,36 @@ def _estimate_ctx_limit(model: Any, fallback: int = 8192) -> int:
     return fallback
 
 
-def build_system_prompt(p: Preset) -> str:
+def build_instruction_block(p: Preset) -> str:
+    # NOTE: we embed this into user message (no role="system")
+    # to satisfy Gemma chat-template alternation.
     return (
-        "You are a clinical decision-support assistant for clinicians.\n"
-        "Rules:\n"
-        f"- Keep the answer under ~{p.max_words_hint} words unless absolutely necessary.\n"
-        "- Be direct, actionable, and safety-conscious.\n"
-        "- If key information is missing, state what you need.\n"
+        "You are an ICU trend summarizer for clinicians.\n"
+        "TASK: Given the provided input, output a SINGLE JSON object.\n\n"
+        "OUTPUT FORMAT (STRICT):\n"
+        "- Output MUST be valid JSON (one object) and NOTHING ELSE.\n"
+        "- Keys MUST be exactly:\n"
+        " status, drivers, what_to_check_next, evidence, narrative, disclaimer\n"
+        "- No extra keys. No markdown. No code fences. No preamble text.\n\n"
+        "CONTENT RULES:\n"
+        "- Be direct, actionable, safety-conscious.\n"
+        f"- Keep it compact (aim ~{p.max_words_hint} words total when possible).\n"
+        "- Do NOT invent missing data. If a value is NA / not provided, say it is missing/unknown.\n"
+        "- If key info is missing, put the request inside 'what_to_check_next' (snake_case).\n"
+        "- 'evidence' must ONLY cite what is present in the input (e.g., 'RR last=32', 'pH last=7.31').\n"
+        "- 'drivers' and 'what_to_check_next' should be short snake_case tokens.\n"
+        "- 'narrative' should be 1–3 short sentences summarizing status + top concerns.\n"
+        "- 'disclaimer' should be a short safety disclaimer.\n\n"
+        "SAFETY / SANITIZATION:\n"
         "- Do NOT output hidden reasoning, chain-of-thought, or internal tags.\n"
-        "- Never output '<unused94>thought'.\n"
-        "- Output only the final answer.\n"
+        "- Never output '<unused94>thought' or any 'thought' tag.\n"
+        "- Output only the final JSON object.\n"
     )
 
 
-def build_user_instruction(preset: str) -> str:
-    if preset == "quick":
-        return (
-            "Provide:\n"
-            "1) Top problems (max 5 bullets)\n"
-            "2) Immediate next steps (max 5 bullets)\n"
-            "3) Red flags (max 5 bullets)\n"
-            "Keep it concise."
-        )
-    if preset == "normal":
-        return (
-            "Provide a structured clinical summary:\n"
-            "- SOAP (S, O, A, P)\n"
-            "- Task list\n"
-            "- Red flags\n"
-            "- Patient-friendly summary (2-4 sentences)\n"
-            "Keep it practical."
-        )
-    return (
-        "Provide a thorough clinical analysis:\n"
-        "- Key problems + severity/urgency\n"
-        "- Differential considerations\n"
-        "- Recommended workup (tests/imaging/labs)\n"
-        "- Treatment/management considerations\n"
-        "- Safety / red flags\n"
-        "- Patient-friendly summary\n"
-        "Avoid overconfidence; state uncertainty clearly."
-    )
-
-
-def _messages_text_only(system_text: str, user_text: str, assistant_text: Optional[str] = None) -> List[Dict[str, Any]]:
-    msgs = [
-        {"role": "system", "content": [{"type": "text", "text": system_text}]},
-        {"role": "user", "content": [{"type": "text", "text": user_text}]},
-    ]
-    if assistant_text is not None:
-        msgs.append({"role": "assistant", "content": [{"type": "text", "text": assistant_text}]})
-    return msgs
+def _messages_user_only(user_text: str) -> List[Dict[str, Any]]:
+    # Single user message => no alternation issues, Gemma template safe.
+    return [{"role": "user", "content": [{"type": "text", "text": user_text}]}]
 
 
 def _get_tokenizer(processor: Any):
@@ -187,7 +188,10 @@ def _get_tokenizer(processor: Any):
 
 def _sanitize_reply(text: str) -> str:
     text = (text or "")
-    text = re.sub(r"<unused94>thought.*", "", text, flags=re.IGNORECASE | re.DOTALL)
+    # Remove markdown code fences if they appear
+    text = text.replace("```json", "").replace("```", "")
+    # Remove any thought tags
+    text = re.sub(r"<unused94>\s*thought", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text
 
@@ -195,72 +199,93 @@ def _sanitize_reply(text: str) -> str:
 def _supports_generate_kw(model: Any, kw: str) -> bool:
     try:
         import inspect
+
         return kw in inspect.signature(model.generate).parameters
     except Exception:
         return False
 
 
-def _is_bullet(line: str) -> bool:
-    s = (line or "").strip()
-    return bool(s) and (s.startswith("*") or s.startswith("-") or s.startswith("•"))
-
-
-def _quick_complete(text: str) -> bool:
+def _extract_json_candidates(s: str) -> List[str]:
     """
-    True if the quick format appears complete:
-      - has Top Problems, Immediate Next Steps, Red Flags
-      - and at least 1 bullet under each section
+    Extract balanced {...} blocks while respecting JSON strings.
+    Returns candidates in appearance order.
     """
-    t = text or ""
-    lines = t.splitlines()
-    headings = ["top problems", "immediate next steps", "red flags"]
+    s = s or ""
+    candidates: List[str] = []
+    in_str = False
+    esc = False
+    depth = 0
+    start = None
 
-    def has_heading(h: str) -> bool:
-        return any(h in (ln or "").lower() for ln in lines)
+    for i, ch in enumerate(s):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
 
-    def bullets_after(h: str) -> bool:
-        # find first heading line
-        idx = None
-        for i, ln in enumerate(lines):
-            if h in (ln or "").lower():
-                idx = i
-                break
-        if idx is None:
-            return False
+        if ch == '"':
+            in_str = True
+            continue
 
-        # scan next ~25 lines until next heading; find any bullet
-        for j in range(idx + 1, min(len(lines), idx + 26)):
-            lj = (lines[j] or "").lower()
-            if any(h2 in lj for h2 in headings) and j != idx:
-                break
-            if _is_bullet(lines[j]):
-                return True
-        return False
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidates.append(s[start : i + 1])
+                start = None
 
-    if not all(has_heading(h) for h in headings):
-        return False
-    if not all(bullets_after(h) for h in headings):
-        return False
-    return True
+    return candidates
 
 
-def _trim_overlap(prev: str, new: str, max_window: int = 900, min_k: int = 40) -> str:
-    """
-    Removes repeated prefix of `new` that overlaps with suffix of `prev`.
-    Very safe: only trims if overlap is at least `min_k` chars.
-    """
-    prev = prev or ""
-    new = new or ""
-    if not prev or not new:
-        return new
+def _coerce_and_validate_json(obj: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(obj, dict):
+        return None
+    if not all(k in obj for k in REQUIRED_JSON_KEYS):
+        return None
 
-    tail = prev[-max_window:]
-    head = new[:max_window]
-    max_k = min(len(tail), len(head))
-    for k in range(max_k, min_k - 1, -1):
-        if tail.endswith(head[:k]):
-            return new[k:]
-    return new
+    cleaned = {k: obj.get(k) for k in REQUIRED_JSON_KEYS}
+
+    if not isinstance(cleaned["drivers"], list):
+        cleaned["drivers"] = [] if cleaned["drivers"] is None else [str(cleaned["drivers"])]
+
+    if not isinstance(cleaned["what_to_check_next"], list):
+        cleaned["what_to_check_next"] = (
+            [] if cleaned["what_to_check_next"] is None else [str(cleaned["what_to_check_next"])]
+        )
+
+    if not isinstance(cleaned["evidence"], list):
+        cleaned["evidence"] = [] if cleaned["evidence"] is None else [str(cleaned["evidence"])]
+
+    for k in ["status", "narrative", "disclaimer"]:
+        if cleaned[k] is None:
+            cleaned[k] = ""
+        elif not isinstance(cleaned[k], str):
+            cleaned[k] = str(cleaned[k])
+
+    return cleaned
+
+
+def _extract_first_valid_json(text: str) -> Optional[str]:
+    for cand in _extract_json_candidates(text):
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            continue
+
+        cleaned = _coerce_and_validate_json(obj)
+        if cleaned is None:
+            continue
+
+        return json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
+
+    return None
 
 
 # -----------------------------
@@ -292,10 +317,8 @@ class ModelServer:
         self.tok = None
         self.ctx_limit: int = ctx_fallback
 
-        # generation bans
+        # bad_words_ids: DO NOT ban EOS. Only suppress PAD + "<unused94>thought".
         self.bad_words_ids: List[List[int]] = []
-
-        # ✅ added: adapter sanity info (so /health can show it)
         self.adapter_info: Dict[str, Any] = {}
 
     def load(self):
@@ -324,7 +347,11 @@ class ModelServer:
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=compute_dtype if compute_dtype in (torch.float16, torch.bfloat16) else torch.float16,
+                bnb_4bit_compute_dtype=(
+                    compute_dtype
+                    if compute_dtype in (torch.float16, torch.bfloat16)
+                    else torch.float16
+                ),
             )
 
         if self.device.lower() == "cuda" and torch.cuda.is_available():
@@ -354,29 +381,25 @@ class ModelServer:
         self.model = PeftModel.from_pretrained(self.model, self.adapter_dir, is_trainable=False)
         self.model.eval()
 
-        # ✅ ADDED: PEFT adapter sanity checks (no changes to your generation code)
+        # PEFT sanity checks
         is_peft = isinstance(self.model, PeftModel)
-
-        # active adapter name (varies by peft version)
         active = getattr(self.model, "active_adapter", None)
         active_list = getattr(self.model, "active_adapters", None)
         if active_list:
             active = active_list
 
-        # count LoRA params + quick sample of keys
         lora_param_names: List[str] = []
         lora_param_count = 0
         lora_sq_sum = 0.0
 
         for n, p in self.model.named_parameters():
-            if "lora_" in n:  # catches lora_A / lora_B / lora_embedding etc
+            if "lora_" in n:
                 lora_param_names.append(n)
                 lora_param_count += p.numel()
-                # norm proxy (safe + cheap) - once at load
                 with torch.no_grad():
                     lora_sq_sum += float((p.detach().float() ** 2).sum().cpu().item())
 
-        lora_norm = (lora_sq_sum ** 0.5)
+        lora_norm = (lora_sq_sum**0.5)
 
         print(
             f"[PEFT] is_peft={is_peft} | active={active} | "
@@ -384,7 +407,6 @@ class ModelServer:
             f"example_keys={lora_param_names[:3]}"
         )
 
-        # store for /health
         self.adapter_info = {
             "is_peft": bool(is_peft),
             "active_adapter": active,
@@ -395,7 +417,9 @@ class ModelServer:
         }
 
         if (not is_peft) or (lora_param_count == 0):
-            raise RuntimeError("Adapter did not appear to load: no PEFT wrapper or no LoRA parameters found.")
+            raise RuntimeError(
+                "Adapter did not appear to load: no PEFT wrapper or no LoRA parameters found."
+            )
 
         # enable cache for inference speed
         try:
@@ -403,26 +427,26 @@ class ModelServer:
                 self.model.config.use_cache = True
         except Exception:
             pass
+
         try:
-            if hasattr(self.model, "generation_config") and hasattr(self.model.generation_config, "use_cache"):
+            if hasattr(self.model, "generation_config") and hasattr(
+                self.model.generation_config, "use_cache"
+            ):
                 self.model.generation_config.use_cache = True
         except Exception:
             pass
 
         self.ctx_limit = _estimate_ctx_limit(self.model, fallback=self.ctx_fallback)
 
-        # Build bad_words_ids to avoid "empty decode" (PAD/EOS spam) on retries
+        # bad_words_ids: ban PAD; ban "<unused94>thought" sequence if encodable (never EOS)
         self.bad_words_ids = []
-        if self.tok.eos_token_id is not None:
-            self.bad_words_ids.append([int(self.tok.eos_token_id)])
         if self.tok.pad_token_id is not None:
             self.bad_words_ids.append([int(self.tok.pad_token_id)])
 
-        # Also ban "<unused94>thought" if it exists
         try:
-            tid = self.tok.convert_tokens_to_ids("<unused94>thought")
-            if isinstance(tid, int) and tid >= 0 and tid != self.tok.unk_token_id:
-                self.bad_words_ids.append([tid])
+            seq = self.tok.encode("<unused94>thought", add_special_tokens=False)
+            if seq and (self.tok.unk_token_id is None or self.tok.unk_token_id not in seq):
+                self.bad_words_ids.append([int(x) for x in seq])
         except Exception:
             pass
 
@@ -432,12 +456,13 @@ class ModelServer:
             "cuda_available": torch.cuda.is_available(),
             "gpu": get_gpu_name(),
             "device_requested": self.device,
-            "is_loaded_in_4bit": getattr(self.model, "is_loaded_in_4bit", None) if self.model is not None else None,
+            "is_loaded_in_4bit": (
+                getattr(self.model, "is_loaded_in_4bit", None) if self.model is not None else None
+            ),
             "ctx_limit_est": self.ctx_limit,
             "base_model": self.base_model,
             "adapter_dir": self.adapter_dir,
             "processor_dir": self.processor_dir,
-            # ✅ added
             "adapter": (self.adapter_info or None),
         }
 
@@ -484,6 +509,7 @@ class ModelServer:
         else:
             token_type_ids = torch.zeros_like(input_ids)
 
+        # explicit 2D guarantees
         if input_ids.dim() != 2:
             raise ValueError(f"input_ids must be 2D; got {tuple(input_ids.shape)}")
         if attention_mask.dim() != 2:
@@ -500,16 +526,17 @@ class ModelServer:
     @torch.inference_mode()
     def _generate_once(
         self,
-        messages: List[Dict[str, Any]],
+        user_text: str,
         max_new_tokens: int,
         temperature: float,
         top_p: float,
         repetition_penalty: float,
         do_sample: bool,
         min_new_tokens: int,
-        ban_specials: bool,
         debug: bool,
     ) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
+        messages = _messages_user_only(user_text)
+
         margin = 64
         max_in = max(128, self.ctx_limit - int(max_new_tokens) - margin)
 
@@ -531,7 +558,8 @@ class ModelServer:
             eos_token_id=self.tok.eos_token_id,
         )
 
-        if ban_specials and self.bad_words_ids:
+        # Never ban EOS. Only suppress PAD / "<unused94>thought".
+        if self.bad_words_ids:
             gen_kwargs["bad_words_ids"] = self.bad_words_ids
 
         if _supports_generate_kw(self.model, "min_new_tokens"):
@@ -552,13 +580,13 @@ class ModelServer:
 
         dbg: Dict[str, Any] = {}
         if debug:
-            toks = self.tok.convert_ids_to_tokens(gen_ids[:50].tolist())
+            toks = self.tok.convert_ids_to_tokens(gen_ids[:60].tolist())
             dbg["first_tokens"] = toks
-            dbg["decoded_raw_unsafe"] = self.tok.decode(gen_ids[:200], skip_special_tokens=False)
+            dbg["decoded_raw_unsafe"] = self.tok.decode(gen_ids[:220], skip_special_tokens=False)
 
         return text, usage, dbg
 
-    def generate_with_continuations(
+    def generate_json(
         self,
         preset: Preset,
         note: str,
@@ -566,154 +594,125 @@ class ModelServer:
         debug: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         max_new = int(overrides.get("max_new_tokens") or preset.max_new_tokens)
-        temperature = float(overrides.get("temperature") if overrides.get("temperature") is not None else preset.temperature)
+
+        temperature = float(
+            overrides.get("temperature") if overrides.get("temperature") is not None else preset.temperature
+        )
         top_p = float(overrides.get("top_p") if overrides.get("top_p") is not None else preset.top_p)
         repetition_penalty = float(
-            overrides.get("repetition_penalty") if overrides.get("repetition_penalty") is not None else preset.repetition_penalty
+            overrides.get("repetition_penalty")
+            if overrides.get("repetition_penalty") is not None
+            else preset.repetition_penalty
         )
 
         do_sample = preset.do_sample
         if overrides.get("temperature") is not None:
             do_sample = temperature > 0.0
 
-        system_text = build_system_prompt(preset)
-        user_text = build_user_instruction(preset.name) + "\n\nCASE:\n" + note.strip()
+        base_instructions = build_instruction_block(preset)
 
-        stitched = ""
-        passes = 0
+        attempts = 0
         usage_all = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
         previews: List[str] = []
         token_debug: List[Dict[str, Any]] = []
+        last_clean = ""
 
         def record(tag: str, txt: str):
             if debug:
-                previews.append(f"{tag}: {repr((txt or '')[:400])}")
+                previews.append(f"{tag}: {repr((txt or '')[:700])}")
 
-        def is_empty(s: str) -> bool:
-            return (s or "").strip() == ""
+        while attempts < preset.max_attempts:
+            attempts += 1
 
-        base_min_new = 32 if preset.name == "quick" else 64
-
-        while passes < preset.max_passes:
-            # ✅ stop BEFORE creating pass2 if quick is already complete
-            if preset.name == "quick" and _quick_complete(stitched):
-                break
-
-            passes += 1
-
-            if passes == 1:
-                msgs = _messages_text_only(system_text, user_text)
-            else:
-                # Stronger continuation instruction: ONLY missing text; if complete, output nothing
-                msgs = _messages_text_only(system_text, user_text, assistant_text=stitched.strip())
-                msgs.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    "Continue ONLY with missing content. "
-                                    "Do NOT repeat any headings or bullets already present above. "
-                                    "If everything is already complete, output nothing."
-                                ),
-                            }
-                        ],
-                    }
+            # Regenerate from scratch each attempt (prevents "second JSON object" continuations)
+            # On retry: stronger instruction appended inside the SAME user message.
+            extra = ""
+            if attempts > 1:
+                extra = (
+                    "\n\nIMPORTANT:\n"
+                    "- Output must be EXACTLY one JSON object.\n"
+                    "- Do NOT start a second JSON object.\n"
+                    "- Ensure all strings are closed and JSON is complete.\n"
                 )
 
-            # Attempt #1
+            user_text = f"{base_instructions}{extra}\nINPUT:\n{note.strip()}\n"
+
+            # Expand token budget on retry to avoid truncation
+            attempt_max_new = max_new if attempts == 1 else int(max_new * 1.7)
+            attempt_max_new = max(256, attempt_max_new)
+
+            # Prevent empty short answers
+            min_new = 48 if preset.name == "quick" else 72
+            if attempts > 1:
+                min_new = max(min_new, 120)
+
             chunk, usage, dbg = self._generate_once(
-                messages=msgs,
-                max_new_tokens=max_new,
+                user_text=user_text,
+                max_new_tokens=attempt_max_new,
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
                 do_sample=do_sample,
-                min_new_tokens=base_min_new,
-                ban_specials=False,
+                min_new_tokens=min_new,
                 debug=debug,
             )
-            record(f"pass{passes}_decoded", chunk)
+
+            for k in usage_all:
+                usage_all[k] += int(usage.get(k, 0))
+
+            record(f"attempt{attempts}_decoded", chunk)
             if debug:
-                token_debug.append({"pass": passes, "attempt": 1, **dbg})
+                token_debug.append({"attempt": attempts, **dbg})
 
-            # If empty decode, retry with bans + sampling
-            if is_empty(chunk):
-                retry_msgs = msgs + [
-                    {"role": "user", "content": [{"type": "text", "text": "Do NOT return an empty answer. Provide the requested content now."}]}
-                ]
-                chunk2, usage2, dbg2 = self._generate_once(
-                    messages=retry_msgs,
-                    max_new_tokens=max_new,
-                    temperature=max(0.35, temperature),
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    do_sample=True,
-                    min_new_tokens=max(128, base_min_new),
-                    ban_specials=True,  # crucial on retry
-                    debug=debug,
-                )
-                record(f"pass{passes}_retry_decoded", chunk2)
+            clean = _sanitize_reply(chunk)
+            last_clean = clean
+
+            json_str = _extract_first_valid_json(clean)
+            if json_str is not None:
+                meta: Dict[str, Any] = {
+                    "attempts": attempts,
+                    "ctx_limit": self.ctx_limit,
+                    "max_new_tokens_requested": int(overrides.get("max_new_tokens") or preset.max_new_tokens),
+                    "usage": usage_all,
+                }
                 if debug:
-                    token_debug.append({"pass": passes, "attempt": 2, **dbg2})
+                    meta["previews"] = previews
+                    meta["token_debug"] = token_debug
+                return json_str, meta
 
-                for k in usage_all:
-                    usage_all[k] += int(usage.get(k, 0)) + int(usage2.get(k, 0))
+            # Retry deterministically
+            do_sample = False
+            temperature = 0.0
+            top_p = 1.0
 
-                chunk_to_add = chunk2 or ""
-            else:
-                for k in usage_all:
-                    usage_all[k] += int(usage.get(k, 0))
-                chunk_to_add = chunk or ""
+        # Always return valid JSON to the client
+        fallback_obj = {
+            "status": "unknown",
+            "drivers": [],
+            "what_to_check_next": [
+                "output_was_not_valid_json",
+                "increase_max_new_tokens_or_check_input_format",
+            ],
+            "evidence": [],
+            "narrative": "Model output could not be parsed as a valid JSON object with the required keys.",
+            "disclaimer": "Demo only. Not medical advice. Clinician review required.",
+        }
 
-            chunk_to_add = _sanitize_reply(chunk_to_add)
-
-            # ✅ dedupe: if chunk is already contained, skip it
-            if chunk_to_add.strip() and chunk_to_add.strip() in stitched:
-                chunk_to_add = ""
-
-            # ✅ dedupe: overlap trim
-            chunk_to_add = _trim_overlap(stitched, chunk_to_add)
-
-            # ✅ quick-specific: if we already have complete quick output, ignore further repeated restarts
-            if preset.name == "quick" and _quick_complete(stitched) and chunk_to_add.strip().lower().startswith(("**top problems", "top problems")):
-                chunk_to_add = ""
-
-            if chunk_to_add.strip():
-                stitched = (stitched + "\n" + chunk_to_add).strip()
-
-            stitched = _sanitize_reply(stitched)
-
-            # ✅ quick-specific: stop immediately when complete
-            if preset.name == "quick" and _quick_complete(stitched):
-                break
-
-            # For non-quick, if model stopped early (didn't use full budget), assume it's done
-            if preset.name != "quick":
-                if usage.get("completion_tokens", 0) < max_new and not is_empty(stitched):
-                    break
-
-            # Stabilize later passes
-            temperature = max(0.15, temperature * 0.85)
-            do_sample = do_sample and temperature > 0.0
-
-        final_text = _sanitize_reply(stitched)
-        if final_text.strip() == "":
-            final_text = "No visible text was generated. Try preset='normal' or set temperature=0.6."
+        fallback = json.dumps(fallback_obj, ensure_ascii=False, separators=(",", ":"))
 
         meta: Dict[str, Any] = {
-            "passes": passes,
+            "attempts": attempts,
             "ctx_limit": self.ctx_limit,
             "max_new_tokens_requested": int(overrides.get("max_new_tokens") or preset.max_new_tokens),
             "usage": usage_all,
         }
+
         if debug:
             meta["previews"] = previews
             meta["token_debug"] = token_debug
+            meta["last_unparsed_text_head"] = (last_clean or "")[:900]
 
-        return final_text, meta
+        return fallback, meta
 
 
 # -----------------------------
@@ -725,13 +724,17 @@ def create_app(server: ModelServer) -> FastAPI:
         server.load()
         yield
 
-    app = FastAPI(title="MedGemma QLoRA Local API", version="1.0.6", lifespan=lifespan)
+    app = FastAPI(
+        title="MedGemma QLoRA Local API",
+        version="1.1.0",
+        lifespan=lifespan,
+    )
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],          # local-only dev convenience
+        allow_origins=["*"],  # local-only dev convenience
         allow_credentials=False,
-        allow_methods=["*"],          # includes OPTIONS
+        allow_methods=["*"],  # includes OPTIONS
         allow_headers=["*"],
     )
 
@@ -760,10 +763,11 @@ def create_app(server: ModelServer) -> FastAPI:
         }
 
         t0 = _now_ms()
+
         async with server.gpu_sem:
             try:
                 reply, meta = await asyncio.to_thread(
-                    server.generate_with_continuations,
+                    server.generate_json,
                     preset,
                     note,
                     overrides,
@@ -771,6 +775,7 @@ def create_app(server: ModelServer) -> FastAPI:
                 )
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Generation failed: {repr(e)}")
+
         dt = _now_ms() - t0
 
         return AnalyzeResponse(
@@ -815,7 +820,14 @@ def main():
     app = create_app(server)
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=True)
+
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        access_log=True,
+    )
 
 
 if __name__ == "__main__":
