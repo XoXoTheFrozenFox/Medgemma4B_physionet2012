@@ -1,4 +1,17 @@
-<h2 align="center">⚒️ Technologies used ⚒️</h2>
+<h1 align="center">🤕ICU clinical assistance on physionet2012🤕</h1>
+<h2 align="center">Description of project</h2>
+<h2 align="center">API logs</h2>
+<img src="https://github.com/user-attachments/assets/4d619f17-351d-497c-bca2-d0ebf9616919" />
+<h2 align="center">Desktop app output</h2>
+<img src="https://github.com/user-attachments/assets/2c5cf4b4-9de0-40ca-8f51-68d1cd64c6fd"" />
+<h2 align="center">Web app output</h2>
+<img src="https://github.com/user-attachments/assets/9e95eb70-230a-49f1-bd6f-3eefe266efcc" />
+<h2 align="center">Mobile app output</h2>
+<div style="display:flex; gap:12px; flex-wrap:wrap; justify-content:center; align-items:center; max-width:700px; margin:0 auto;">
+  <img src="https://github.com/user-attachments/assets/3a760df1-de87-4e0f-a919-1fa9b7047af0" alt="Image 1" style="width:400px; max-width:100%; height:auto;" />
+  <img src="https://github.com/user-attachments/assets/e3e7cd59-d37a-46e1-840a-6f751919c103" alt="Image 2" style="width:400px; max-width:100%; height:auto;" />
+</div>
+<h2 align="center">🛠️Tools and technologies used⚒️</h2>
 <div align="center">
      <img src="https://skillicons.dev/icons?i=github,anaconda,python,sklearn,pytorch,fastapi,powershell,bash,windows,linux,regex,dart" />
      <img src="https://skillicons.dev/icons?i=flutter,gradle,npm,nodejs,html,css,javascript,typescript,react,electron,vite,latex,vscode,androidstudio" /> 
