@@ -1,5 +1,14 @@
 <h1 align="center">🤕ICU clinical assistance on physionet2012🤕</h1>
+<h2 align="center">Project icon</h2>
+<img src="https://github.com/user-attachments/assets/324da53a-51c9-4e30-8eb2-c87ce8687c74" />
+<h2 align="center">Project banner</h2>
+<img src="https://github.com/user-attachments/assets/11ca837d-5aaa-405e-89b5-68ccfe544e73" />
 <h2 align="center">Description of project</h2>
+<h2 align="center">Training graphs generated on a validation sample of 100 data points</h2>
+<img src="https://github.com/user-attachments/assets/5ef29496-88e5-4de3-9ada-04b8fa8084cb" />
+<img src="https://github.com/user-attachments/assets/102cebdf-4772-412f-b272-2727f5483159" /> 
+<h2 align="center">Project architecture</h2>
+<img src="" />
 <h2 align="center">API logs</h2>
 <img src="https://github.com/user-attachments/assets/4d619f17-351d-497c-bca2-d0ebf9616919" />
 <h2 align="center">Desktop app output</h2>
