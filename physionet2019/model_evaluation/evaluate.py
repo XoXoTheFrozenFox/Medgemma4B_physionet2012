@@ -3,30 +3,20 @@
 # ------------------------------------------------------------
 # Evaluate MedGemma LoRA / QLoRA adapters on val.jsonl (prompt/target)
 #
-# Updated for PhysioNet 2019-style tasks (sepsis early warning / binary label),
-# while KEEPING backward compatibility with your older "status/drivers/..." schema.
+# CRITICAL FIXES (your current failure mode):
+# 1) prompt_len_tokens=2 / raw_output="" / pred_json=null:
+#    - FORCE tokenizer + processor from BASE MODEL (adapter checkpoints often lack tokenizer/chat_template)
+#    - Inject a default Gemma chat_template if missing
+#    - FAIL FAST if prompt_len is tiny (so you don’t wait 300s)
 #
-# Key features:
-# - Loads processor/tokenizer from adapter_dir when available (avoids HF download)
-# - Supports LoRA (fp16/bf16) and QLoRA (4-bit NF4) base loading
-# - Forces “JSON-only” instruction onto prompts (without editing dataset)
-# - Optionally enforces required output keys (helps keep schema stable)
-# - Blocks '<unused94>thought' token/sequence where tokenizer supports it
-# - Decodes ONLY generated continuation (not prompt echo)
-# - Robustly extracts the FIRST valid JSON object (handles repeated JSON blocks)
-# - Writes adapter_loaded into outputs + metrics
-# - 2019 metrics:
-#     * sepsis label classification (accuracy/precision/recall/F1/balanced acc/specificity)
-#     * AUROC/AUPRC/Brier when probability-like field is present
-#     * optional factors list overlap (F1/Jaccard)
-# - Still supports legacy schema metrics (status/drivers/checks/narrative)
+# 2) Outputs take too long:
+#    - Default max_new=256
+#    - Default max_retries=0 (no doubling to 1024)
+#    - Optional JSON brace early-stopping during generation
 #
-# FIX (no transformers upgrade needed):
-# - Some older transformers versions return an AutoProcessor WITHOUT .tokenizer.
-#   -> We now load AutoTokenizer separately (adapter_dir first, else base_model),
-#      and we build chat-template inputs using:
-#         tokenizer.apply_chat_template (if available) else processor.apply_chat_template
-#         else a safe Gemma-style fallback wrapper.
+# Keeps:
+# - LoRA / QLoRA base loading
+# - JSON extraction and metrics (p2019_sepsis + legacy_status)
 # ------------------------------------------------------------
 
 import argparse
@@ -34,7 +24,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -57,15 +47,27 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
 )
+from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList
 
 from hf_auth import get_hf_token, try_with_token
 
 
 # ---------------------------
-# Dtype / helpers
+# Speed knobs (safe)
+# ---------------------------
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+try:
+    torch.set_float32_matmul_precision("high")
+except Exception:
+    pass
+
+
+# ---------------------------
+# Helpers
 # ---------------------------
 def pick_compute_dtype():
-    # For eval: bf16 if supported else fp16
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         return torch.bfloat16
     if torch.cuda.is_available():
@@ -74,6 +76,10 @@ def pick_compute_dtype():
 
 
 def ensure_dir(p: str):
+    if not p:
+        return
+    if os.path.exists(p) and not os.path.isdir(p):
+        raise RuntimeError(f"Path exists but is not a directory: {p}")
     os.makedirs(p, exist_ok=True)
 
 
@@ -109,17 +115,7 @@ def _strip_code_fences(text: str) -> str:
 
 
 def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
-    """
-    Robust JSON extractor that returns (obj, blob) for the FIRST complete JSON object.
-    Handles cases where model outputs repeated JSON blocks back-to-back.
-
-    - strips code fences
-    - finds first '{'
-    - scans forward with brace-depth while respecting strings/escapes
-    - returns the first balanced {...} that parses as JSON
-    """
     text = _strip_code_fences(text)
-
     start = text.find("{")
     if start == -1:
         return None, None
@@ -156,8 +152,39 @@ def extract_first_json(text: str) -> Tuple[Optional[dict], Optional[str]]:
     return None, None
 
 
+def stop_at_json_object(text: str) -> str:
+    t = _strip_code_fences(text or "")
+    start = t.find("{")
+    if start == -1:
+        return t
+
+    depth = 0
+    in_str = False
+    esc = False
+
+    for i in range(start, len(t)):
+        ch = t[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return t[start : i + 1]
+    return t
+
+
 def parse_target_field(target: Any) -> Any:
-    # target can be: dict, JSON-string, or plain string
     if isinstance(target, dict):
         return target
     if isinstance(target, str):
@@ -177,7 +204,6 @@ def safe_list(x) -> List[str]:
     if isinstance(x, list):
         return [str(v) for v in x if str(v).strip()]
     if isinstance(x, str):
-        # comma-separated strings
         return [s.strip() for s in x.split(",") if s.strip()]
     return [str(x)]
 
@@ -256,7 +282,6 @@ DEFAULT_LABEL_KEYS = [
     "sepsis_within_3h",
     "sepsis_within_12h",
 ]
-
 DEFAULT_PROB_KEYS = [
     "prob",
     "probability",
@@ -266,7 +291,6 @@ DEFAULT_PROB_KEYS = [
     "sepsis_risk",
     "sepsis_probability",
 ]
-
 DEFAULT_FACTORS_KEYS = [
     "top_factors",
     "factors",
@@ -284,7 +308,6 @@ def _to_int_label(v: Any) -> Optional[int]:
     if isinstance(v, (int, np.integer)):
         return 1 if int(v) != 0 else 0
     if isinstance(v, (float, np.floating)):
-        # treat >=0.5 as positive if it's a float
         return 1 if float(v) >= 0.5 else 0
     if isinstance(v, str):
         s = v.strip().lower()
@@ -292,7 +315,6 @@ def _to_int_label(v: Any) -> Optional[int]:
             return 1
         if s in ("0", "false", "no", "n", "neg", "negative", "no_sepsis", "nonsepsis", "non-sepsis"):
             return 0
-        # fallback: try int parse
         try:
             iv = int(float(s))
             return 1 if iv != 0 else 0
@@ -308,20 +330,16 @@ def _to_prob(v: Any) -> Optional[float]:
         return 1.0 if v else 0.0
     if isinstance(v, (int, np.integer, float, np.floating)):
         x = float(v)
-        # normalize common formats
         if x > 1.0 and x <= 100.0:
             x = x / 100.0
-        # clamp
-        x = max(0.0, min(1.0, x))
-        return x
+        return max(0.0, min(1.0, x))
     if isinstance(v, str):
         s = v.strip().lower().replace("%", "")
         try:
             x = float(s)
             if x > 1.0 and x <= 100.0:
                 x = x / 100.0
-            x = max(0.0, min(1.0, x))
-            return x
+            return max(0.0, min(1.0, x))
         except Exception:
             return None
     return None
@@ -359,19 +377,13 @@ def extract_factors(obj: Any, keys: List[str]) -> List[str]:
 
 
 def detect_schema(val_recs: List[dict]) -> str:
-    """
-    Returns:
-      - "legacy_status" if target dict looks like your old schema
-      - "p2019_sepsis" otherwise (default)
-    """
     for rec in val_recs[:50]:
         tgt = parse_target_field(rec.get("target", ""))
         if isinstance(tgt, dict):
-            if "status" in tgt or ("drivers" in tgt and "what_to_check_next" in tgt):
-                return "legacy_status"
-            # likely 2019 if it has a sepsis-ish key
             if any(k in tgt for k in DEFAULT_LABEL_KEYS):
                 return "p2019_sepsis"
+            if "status" in tgt or ("drivers" in tgt and "what_to_check_next" in tgt):
+                return "legacy_status"
     return "p2019_sepsis"
 
 
@@ -388,7 +400,6 @@ def plot_training_curves(trainer_state_path: str, out_png: str):
         return
 
     hist = state.get("log_history", [])
-
     steps, train_loss = [], []
     eval_steps, eval_loss = [], []
 
@@ -418,13 +429,11 @@ def plot_training_curves(trainer_state_path: str, out_png: str):
 
 def plot_confusion(cm: np.ndarray, labels: List[str], out_png: str, title: str):
     cm = np.asarray(cm)
-
     n = max(1, len(labels))
     fig_w = min(14.0, max(6.0, 0.8 * n))
     fig_h = min(12.0, max(5.5, 0.7 * n))
 
     plt.figure(figsize=(fig_w, fig_h))
-
     vmax = float(cm.max()) if cm.size else 1.0
     im = plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues, vmin=0.0, vmax=vmax)
 
@@ -465,158 +474,302 @@ def plot_bar(metrics: Dict[str, float], keys: List[str], out_png: str, title: st
 
 
 # ---------------------------
-# Chat template input builder (MedGemma text-only)
+# Chat template + encoding
 # ---------------------------
-def _messages_text_only(prompt: str) -> List[Dict[str, Any]]:
-    return [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+GEMMA_DEFAULT_CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'user' %}"
+    "<start_of_turn>user\n{{ message['content'] }}<end_of_turn>\n"
+    "{% elif message['role'] == 'assistant' %}"
+    "<start_of_turn>model\n{{ message['content'] }}<end_of_turn>\n"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "<start_of_turn>model\n"
+    "{% endif %}"
+)
 
 
-def _maybe_get_chat_applier(tokenizer, processor):
+def ensure_chat_template(tokenizer, processor):
+    # If tokenizer/processor lacks a chat_template, inject a sane Gemma template.
+    try:
+        ct = getattr(tokenizer, "chat_template", None)
+        if not ct:
+            tokenizer.chat_template = GEMMA_DEFAULT_CHAT_TEMPLATE
+    except Exception:
+        pass
+    try:
+        if processor is not None:
+            pct = getattr(processor, "chat_template", None)
+            # some processors proxy to tokenizer; safe to set anyway
+            if not pct and hasattr(processor, "tokenizer") and processor.tokenizer is not None:
+                if not getattr(processor.tokenizer, "chat_template", None):
+                    processor.tokenizer.chat_template = GEMMA_DEFAULT_CHAT_TEMPLATE
+    except Exception:
+        pass
+
+
+def _messages_variants(prompt: str) -> List[List[Dict[str, Any]]]:
+    p = prompt or ""
+    return [
+        [{"role": "user", "content": p}],
+        [{"role": "user", "content": [{"type": "text", "text": p}]}],
+    ]
+
+
+def _to_2d_tensors(enc: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    if "input_ids" not in enc:
+        raise RuntimeError("Encoding has no input_ids.")
+    input_ids = enc["input_ids"]
+    attn = enc.get("attention_mask", None)
+    ttype = enc.get("token_type_ids", None)
+
+    if torch.is_tensor(input_ids):
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if attn is None:
+            attn = torch.ones_like(input_ids, dtype=torch.long)
+        elif torch.is_tensor(attn) and attn.dim() == 1:
+            attn = attn.unsqueeze(0)
+        outb = {"input_ids": input_ids.to(torch.long), "attention_mask": attn.to(torch.long)}
+        if ttype is not None and torch.is_tensor(ttype):
+            if ttype.dim() == 1:
+                ttype = ttype.unsqueeze(0)
+            outb["token_type_ids"] = ttype.to(torch.long)
+        return outb
+
+    if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
+        input_ids = input_ids[0]
+    if attn is not None and isinstance(attn, list) and attn and isinstance(attn[0], list):
+        attn = attn[0]
+    if ttype is not None and isinstance(ttype, list) and ttype and isinstance(ttype[0], list):
+        ttype = ttype[0]
+
+    if attn is None:
+        attn = [1] * len(input_ids)
+
+    outb = {
+        "input_ids": torch.tensor([input_ids], dtype=torch.long),
+        "attention_mask": torch.tensor([attn], dtype=torch.long),
+    }
+    if ttype is not None:
+        outb["token_type_ids"] = torch.tensor([ttype], dtype=torch.long)
+    return outb
+
+
+def encode_best(processor, tokenizer, prompt: str, max_len: int) -> Tuple[Dict[str, torch.Tensor], int, str, Dict[str, int], Dict[str, str]]:
     """
-    Returns an object that has apply_chat_template:
-      prefer tokenizer (newer best practice), else processor, else None.
-    """
-    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-        return tokenizer
-    if processor is not None and hasattr(processor, "apply_chat_template"):
-        return processor
-    return None
-
-
-def _gemma_fallback_wrap(prompt: str) -> str:
-    """
-    Fallback if apply_chat_template is missing in old transformers.
-    Gemma IT commonly uses <start_of_turn>/<end_of_turn> wrappers.
-    If your local tokenizer doesn't know these tokens, it'll just tokenize as text;
-    still usable as a last-resort to keep evaluation running.
-    """
-    p = prompt.rstrip()
-    return f"<start_of_turn>user\n{p}<end_of_turn>\n<start_of_turn>model\n"
-
-
-def _apply_chat(processor, tokenizer, prompt: str, max_len: int):
-    """
-    Returns dict with torch tensors on CPU: input_ids, attention_mask (+ optional token_type_ids).
-    Compatible with older transformers:
-      - tries apply_chat_template with various signatures
-      - falls back to manual wrapper + tokenizer() if needed
+    Returns: inputs_cpu, prompt_len, best_strategy, candidate_lens, candidate_errors
     """
     if tokenizer is None:
         raise RuntimeError("Tokenizer is required but was not loaded.")
 
-    msgs = _messages_text_only(prompt)
-    applier = _maybe_get_chat_applier(tokenizer, processor)
+    ensure_chat_template(tokenizer, processor)
 
-    # Helper: normalize to 2D torch tensors on CPU
-    def _to_2d_tensors(enc: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        if "input_ids" not in enc:
-            raise RuntimeError("Encoding has no input_ids.")
-        input_ids = enc["input_ids"]
-        attn = enc.get("attention_mask", None)
-        ttype = enc.get("token_type_ids", None)
+    candidates: List[Tuple[str, Dict[str, torch.Tensor]]] = []
+    lens: Dict[str, int] = {}
+    errs: Dict[str, str] = {}
 
-        # already tensors?
-        if torch.is_tensor(input_ids):
-            if input_ids.dim() == 1:
-                input_ids = input_ids.unsqueeze(0)
-            if attn is None:
-                attn = torch.ones_like(input_ids, dtype=torch.long)
-            elif torch.is_tensor(attn) and attn.dim() == 1:
-                attn = attn.unsqueeze(0)
-            outb = {"input_ids": input_ids.to(torch.long), "attention_mask": attn.to(torch.long)}
-            if ttype is not None:
-                if torch.is_tensor(ttype) and ttype.dim() == 1:
-                    ttype = ttype.unsqueeze(0)
-                if torch.is_tensor(ttype):
-                    outb["token_type_ids"] = ttype.to(torch.long)
-            return outb
+    msgs_list = _messages_variants(prompt)
 
-        # lists (maybe nested)
-        if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
-            input_ids = input_ids[0]
-        if attn is not None and isinstance(attn, list) and attn and isinstance(attn[0], list):
-            attn = attn[0]
-        if ttype is not None and isinstance(ttype, list) and ttype and isinstance(ttype[0], list):
-            ttype = ttype[0]
+    # A) tokenizer.apply_chat_template
+    if hasattr(tokenizer, "apply_chat_template"):
+        for tag, msgs in [("tok_chat_plain", msgs_list[0]), ("tok_chat_mm", msgs_list[1])]:
+            try:
+                out = tokenizer.apply_chat_template(
+                    msgs,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    truncation=True,
+                    max_length=max_len,
+                )
+                if hasattr(out, "data"):
+                    out = out.data
+                enc = _to_2d_tensors(out)
+                candidates.append((tag, enc))
+                lens[tag] = int(enc["input_ids"].shape[-1])
+            except Exception as e:
+                errs[tag] = repr(e)
 
-        if attn is None:
-            attn = [1] * len(input_ids)
+    # B) processor.apply_chat_template (optional)
+    if processor is not None and hasattr(processor, "apply_chat_template"):
+        for tag, msgs in [("proc_chat_plain", msgs_list[0]), ("proc_chat_mm", msgs_list[1])]:
+            try:
+                out = processor.apply_chat_template(
+                    msgs,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    truncation=True,
+                    max_length=max_len,
+                )
+                if hasattr(out, "data"):
+                    out = out.data
+                enc = _to_2d_tensors(out)
+                candidates.append((tag, enc))
+                lens[tag] = int(enc["input_ids"].shape[-1])
+            except Exception as e:
+                errs[tag] = repr(e)
 
-        outb = {
-            "input_ids": torch.tensor([input_ids], dtype=torch.long),
-            "attention_mask": torch.tensor([attn], dtype=torch.long),
-        }
-        if ttype is not None:
-            outb["token_type_ids"] = torch.tensor([ttype], dtype=torch.long)
-        return outb
+    # C) raw tokenizer(prompt) fallback (works even without chat template)
+    try:
+        enc = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_len)
+        if hasattr(enc, "data"):
+            enc = enc.data
+        enc2 = _to_2d_tensors(enc)
+        candidates.append(("raw_tok", enc2))
+        lens["raw_tok"] = int(enc2["input_ids"].shape[-1])
+    except Exception as e:
+        errs["raw_tok"] = repr(e)
 
-    # 1) Try apply_chat_template if present
-    if applier is not None:
-        # Attempt A: tokenize=True, return_dict=True (newer)
+    if not candidates:
+        raise RuntimeError(f"All encoding strategies failed. errors={errs}")
+
+    tag_best, enc_best = max(candidates, key=lambda x: int(x[1]["input_ids"].shape[-1]))
+    best_len = int(enc_best["input_ids"].shape[-1])
+    return enc_best, best_len, tag_best, lens, errs
+
+
+# ---------------------------
+# Generation: optional early stop when JSON closes
+# ---------------------------
+class JsonBraceStopper(StoppingCriteria):
+    def __init__(self, start_len: int, lbrace_id: int, rbrace_id: int, min_new: int = 16):
+        self.start_len = int(start_len)
+        self.lbrace_id = int(lbrace_id)
+        self.rbrace_id = int(rbrace_id)
+        self.min_new = int(min_new)
+        self._seen_open = False
+        self._depth = 0
+        self._last_proc = self.start_len
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
+        ids = input_ids[0].tolist()
+        cur_len = len(ids)
+        if cur_len <= self._last_proc:
+            return False
+
+        new_ids = ids[self._last_proc : cur_len]
+        self._last_proc = cur_len
+
+        for tid in new_ids:
+            if tid == self.lbrace_id:
+                self._seen_open = True
+                self._depth += 1
+            elif tid == self.rbrace_id and self._seen_open:
+                self._depth -= 1
+                if self._depth <= 0:
+                    # ensure we produced at least some tokens
+                    if (cur_len - self.start_len) >= self.min_new:
+                        return True
+        return False
+
+
+def build_bad_words_ids(tok) -> Optional[List[List[int]]]:
+    bad_sequences = ["<unused94>thought"]
+    bad_ids: List[List[int]] = []
+    for s in bad_sequences:
         try:
-            out = applier.apply_chat_template(
-                msgs,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                truncation=True,
-                max_length=max_len,
-            )
-            return _to_2d_tensors(out)
-        except TypeError:
-            pass
+            ids = tok(s, add_special_tokens=False).input_ids
+            if isinstance(ids, list) and len(ids) > 0:
+                bad_ids.append([int(i) for i in ids])
         except Exception:
-            pass
+            continue
+    return bad_ids if bad_ids else None
 
-        # Attempt B: tokenize=True, return_tensors="pt" (some versions)
-        try:
-            out = applier.apply_chat_template(
-                msgs,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_tensors="pt",
-                truncation=True,
-                max_length=max_len,
-            )
-            # out might be a BatchEncoding; dict() is safe
-            if hasattr(out, "data"):
-                out = out.data
-            return _to_2d_tensors(out)
-        except TypeError:
-            pass
-        except Exception:
-            pass
 
-        # Attempt C: get formatted text then tokenize normally
-        try:
-            formatted = applier.apply_chat_template(
-                msgs,
-                add_generation_prompt=True,
-                tokenize=False,
-            )
-            enc = tokenizer(
-                formatted,
-                return_tensors="pt",
-                truncation=True,
-                max_length=max_len,
-            )
-            if hasattr(enc, "data"):
-                enc = enc.data
-            return _to_2d_tensors(enc)
-        except Exception:
-            pass
-
-    # 2) Final fallback: manual wrapper + tokenizer()
-    formatted = _gemma_fallback_wrap(prompt)
-    enc = tokenizer(
-        formatted,
-        return_tensors="pt",
-        truncation=True,
-        max_length=max_len,
+def strengthen_prompt_for_json(prompt: str, required_keys: List[str]) -> str:
+    req = ""
+    if required_keys:
+        req = "\n" + "Your JSON must include these keys: " + ", ".join([f'"{k}"' for k in required_keys]) + "."
+    extra = ""
+    if any(k.strip().lower() == "sepsis_label" for k in required_keys):
+        extra = "\nIf you output sepsis_label, it MUST be an integer 0 or 1 (not a string)."
+    return (
+        (prompt or "").rstrip()
+        + "\n\n"
+        + "IMPORTANT: Output ONLY valid JSON. Start with '{' and end with '}'. "
+        + "Output exactly ONE JSON object and stop. Do not repeat the JSON. "
+        + "Do not include any other words, headings, code fences, or analysis."
+        + req
+        + extra
     )
-    if hasattr(enc, "data"):
-        enc = enc.data
-    return _to_2d_tensors(enc)
+
+
+def _trim_generated_ids(gen_ids: torch.Tensor, eos_id: Optional[int], strip_ids: Optional[Set[int]] = None) -> List[int]:
+    ids = gen_ids.tolist() if torch.is_tensor(gen_ids) else list(gen_ids)
+    if eos_id is not None:
+        try:
+            eos_int = int(eos_id)
+            if eos_int in ids:
+                ids = ids[: ids.index(eos_int)]
+        except Exception:
+            pass
+    if strip_ids:
+        while ids and int(ids[-1]) in strip_ids:
+            ids.pop()
+        while ids and int(ids[0]) in strip_ids:
+            ids.pop(0)
+    return ids
+
+
+def generate_once(
+    model,
+    tok,
+    inputs_cuda: Dict[str, torch.Tensor],
+    prompt_len: int,
+    max_new_tokens: int,
+    eos_id,
+    pad_id,
+    bad_words_ids,
+    strip_ids: Set[int],
+    json_stop_after: bool,
+    use_json_early_stop: bool,
+) -> Tuple[str, int]:
+    stopping = None
+    if use_json_early_stop:
+        # Only enable if "{" and "}" are single-token encodings
+        try:
+            lb = tok.encode("{", add_special_tokens=False)
+            rb = tok.encode("}", add_special_tokens=False)
+            if len(lb) == 1 and len(rb) == 1:
+                stopping = StoppingCriteriaList([JsonBraceStopper(prompt_len, lb[0], rb[0], min_new=16)])
+        except Exception:
+            stopping = None
+
+    out = model.generate(
+        **inputs_cuda,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        num_beams=1,
+        use_cache=True,
+        eos_token_id=eos_id,
+        pad_token_id=pad_id,
+        bad_words_ids=bad_words_ids,
+        stopping_criteria=stopping,
+    )
+
+    gen_full = out[0][prompt_len:]
+    trimmed_ids = _trim_generated_ids(gen_full, eos_id=eos_id, strip_ids=strip_ids)
+    gen_len_eff = len(trimmed_ids)
+
+    gen_text = tok.decode(trimmed_ids, skip_special_tokens=True).strip() if trimmed_ids else ""
+    if json_stop_after and gen_text:
+        gen_text = stop_at_json_object(gen_text)
+
+    return gen_text, gen_len_eff
+
+
+def _safe_specificity(y_true: List[int], y_pred: List[int]) -> float:
+    if not y_true:
+        return 0.0
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    if cm.shape != (2, 2):
+        return 0.0
+    tn, fp = float(cm[0, 0]), float(cm[0, 1])
+    denom = tn + fp
+    return (tn / denom) if denom > 0 else 0.0
 
 
 # ---------------------------
@@ -630,7 +783,6 @@ class RunSpec:
 
 
 def parse_run(s: str) -> RunSpec:
-    # format: NAME|ADAPTER_DIR|MODE
     parts = s.split("|")
     if len(parts) != 3:
         raise ValueError("Run spec must be: NAME|ADAPTER_DIR|MODE   where MODE is lora or qlora")
@@ -641,51 +793,29 @@ def parse_run(s: str) -> RunSpec:
 
 
 # ---------------------------
-# Model loader for LoRA vs QLoRA
+# Model loader: FORCE base tokenizer/processor
 # ---------------------------
-def _load_processor(base_model: str, adapter_dir: str, token: str):
-    # Prefer adapter_dir if it contains processor files (keeps special tokens consistent)
-    try:
-        return AutoProcessor.from_pretrained(adapter_dir)
-    except Exception:
-        return try_with_token(AutoProcessor.from_pretrained, base_model, token=token)
-
-
-def _load_tokenizer(base_model: str, adapter_dir: str, token: str):
-    # Prefer adapter_dir if tokenizer files exist there (even if processor lacks tokenizer)
-    try:
-        return AutoTokenizer.from_pretrained(adapter_dir, use_fast=True)
-    except Exception:
-        return try_with_token(AutoTokenizer.from_pretrained, base_model, token=token, use_fast=True)
-
-
-def load_model_with_adapter(
-    base_model: str,
-    adapter_dir: str,
-    mode: str,
-    token: str,
-    compute_dtype,
-):
-    processor = _load_processor(base_model=base_model, adapter_dir=adapter_dir, token=token)
-    tok = _load_tokenizer(base_model=base_model, adapter_dir=adapter_dir, token=token)
-
-    # Patch processor.tokenizer if missing (helps downstream code & consistency)
+def load_tokenizer_and_processor(base_model: str, token: str):
+    processor = try_with_token(AutoProcessor.from_pretrained, base_model, token=token)
+    tok = try_with_token(AutoTokenizer.from_pretrained, base_model, token=token, use_fast=True)
     try:
         if getattr(processor, "tokenizer", None) is None:
             processor.tokenizer = tok
     except Exception:
         pass
-
-    # Ensure pad token
     if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
         try:
             tok.pad_token = tok.eos_token
         except Exception:
             pass
+    ensure_chat_template(tok, processor)
+    return tok, processor
+
+
+def load_model_with_adapter(base_model: str, adapter_dir: str, mode: str, token: str, compute_dtype):
+    tok, processor = load_tokenizer_and_processor(base_model=base_model, token=token)
 
     quant_cfg = None
-    torch_dtype = compute_dtype
-
     if mode == "qlora":
         quant_cfg = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -699,14 +829,12 @@ def load_model_with_adapter(
         base_model,
         token=token,
         device_map={"": 0},
-        torch_dtype=torch_dtype if mode == "lora" else None,
+        torch_dtype=compute_dtype if mode == "lora" else None,
         quantization_config=quant_cfg if mode == "qlora" else None,
         low_cpu_mem_usage=True,
     )
 
     adapter_loaded = False
-
-    # Attach adapter if present
     try:
         from peft import PeftModel
 
@@ -719,65 +847,29 @@ def load_model_with_adapter(
     return model, processor, tok, adapter_loaded
 
 
-def build_bad_words_ids(tok) -> Optional[List[List[int]]]:
-    """
-    Blocks the exact sequence we saw in outputs.
-    Uses tokenizer() so it works even if it's multiple tokens.
-    """
-    bad_sequences = ["<unused94>thought"]
-    bad_ids: List[List[int]] = []
-
-    for s in bad_sequences:
-        try:
-            ids = tok(s, add_special_tokens=False).input_ids
-            if isinstance(ids, list) and len(ids) > 0:
-                bad_ids.append([int(i) for i in ids])
-        except Exception:
-            continue
-
-    return bad_ids if bad_ids else None
+def extract_prob(obj: Any, keys: List[str]) -> Optional[float]:
+    if not isinstance(obj, dict):
+        return None
+    for k in keys:
+        if k in obj:
+            p = _to_prob(obj.get(k))
+            if p is not None:
+                return p
+    return None
 
 
-def strengthen_prompt_for_json(prompt: str, required_keys: List[str]) -> str:
-    """
-    Adds a hard constraint without changing your dataset files.
-    Also tells the model to output EXACTLY ONE json object (prevents repeats).
-    If required_keys is provided, we explicitly instruct keys to be present.
-    """
-    req = ""
-    if required_keys:
-        req = (
-            "\n"
-            + "Your JSON must include these keys: "
-            + ", ".join([f'"{k}"' for k in required_keys])
-            + "."
-        )
-
-    return (
-        (prompt or "").rstrip()
-        + "\n\n"
-        + "IMPORTANT: Output ONLY valid JSON. Start with '{' and end with '}'. "
-        + "Output exactly ONE JSON object and stop. Do not repeat the JSON. "
-        + "Do not include any other words, headings, code fences, or analysis."
-        + req
-    )
+def extract_factors(obj: Any, keys: List[str]) -> List[str]:
+    if not isinstance(obj, dict):
+        return []
+    for k in keys:
+        if k in obj:
+            return safe_list(obj.get(k))
+    return []
 
 
 # ---------------------------
-# Evaluation core (legacy + 2019)
+# Evaluation
 # ---------------------------
-def _safe_specificity(y_true: List[int], y_pred: List[int]) -> float:
-    # specificity = TN / (TN + FP)
-    if not y_true:
-        return 0.0
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    if cm.shape != (2, 2):
-        return 0.0
-    tn, fp = float(cm[0, 0]), float(cm[0, 1])
-    denom = tn + fp
-    return (tn / denom) if denom > 0 else 0.0
-
-
 def evaluate_one_run(
     run: RunSpec,
     base_model: str,
@@ -793,9 +885,18 @@ def evaluate_one_run(
     label_keys: List[str],
     prob_keys: List[str],
     factors_keys: List[str],
+    print_every: int,
+    fail_on_short_prompt: bool,
+    min_ok_prompt_len: int,
+    json_stop_after: bool,
+    use_json_early_stop: bool,
 ):
+    ensure_dir(out_dir)
     run_dir = os.path.join(out_dir, run.name)
     ensure_dir(run_dir)
+
+    outputs_path = os.path.join(run_dir, "sample_outputs.jsonl")
+    ensure_dir(os.path.dirname(outputs_path))
 
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available.")
@@ -807,98 +908,92 @@ def evaluate_one_run(
         token=token,
         compute_dtype=compute_dtype,
     )
+
     bad_words_ids = build_bad_words_ids(tok)
 
-    # Determine schema
     auto_schema = detect_schema(val_recs)
     schema = auto_schema if task == "auto" else task
     if schema not in ("legacy_status", "p2019_sepsis"):
         schema = "p2019_sepsis"
 
-    # Outputs
-    outputs_path = os.path.join(run_dir, "sample_outputs.jsonl")
-
     json_ok = 0
     req_ok_rates: List[float] = []
-
-    # perf
     latencies: List[float] = []
     gen_lengths: List[int] = []
 
-    # deterministic-ish (reserved)
-    _ = np.random.default_rng(seed)
-
-    # Legacy accumulators
     status_true, status_pred = [], []
     drivers_f1, checks_f1 = [], []
     drivers_j, checks_j = [], []
     rouge_scores = []
 
-    # 2019 accumulators
     y_true: List[int] = []
     y_pred: List[int] = []
     y_prob: List[float] = []
-    factors_f1: List[float] = []
-    factors_j: List[float] = []
-    rouge_expl: List[float] = []
+
+    _ = np.random.default_rng(seed)
+
+    eos_id = getattr(tok, "eos_token_id", None)
+    pad_id = getattr(tok, "pad_token_id", None)
+
+    strip_ids: Set[int] = set(getattr(tok, "all_special_ids", []) or [])
+    if pad_id is not None:
+        strip_ids.add(int(pad_id))
+    if eos_id is not None:
+        strip_ids.add(int(eos_id))
 
     with open(outputs_path, "w", encoding="utf-8") as outf:
-        for rec in val_recs:
+        for idx, rec in enumerate(val_recs):
             base_prompt = rec.get("prompt", "")
             prompt = strengthen_prompt_for_json(base_prompt, required_keys)
-            target_raw = rec.get("target", "")
-            tgt = parse_target_field(target_raw)
+            tgt = parse_target_field(rec.get("target", ""))
 
-            inputs = _apply_chat(processor, tok, prompt, max_len=max_len)
-            prompt_len = int(inputs["input_ids"].shape[-1])  # BEFORE cuda
+            inputs_cpu, prompt_len, encode_strategy, enc_lens, enc_errs = encode_best(
+                processor=processor,
+                tokenizer=tok,
+                prompt=prompt,
+                max_len=max_len,
+            )
 
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+            if fail_on_short_prompt and prompt_len < min_ok_prompt_len:
+                # Hard stop: your previous run wasted 300s per sample because prompt_len was 2.
+                raise RuntimeError(
+                    f"FATAL: prompt_len_tokens={prompt_len} (<{min_ok_prompt_len}). "
+                    f"Encoding is broken. strategy={encode_strategy} lens={enc_lens} errors={enc_errs}"
+                )
+
+            inputs = {k: v.to("cuda") for k, v in inputs_cpu.items()}
 
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-
             with torch.inference_mode():
-                out = model.generate(
-                    **inputs,
+                gen_text, gen_len_eff = generate_once(
+                    model=model,
+                    tok=tok,
+                    inputs_cuda=inputs,
+                    prompt_len=prompt_len,
                     max_new_tokens=max_new,
-                    do_sample=False,
-                    temperature=0.0,
-                    eos_token_id=getattr(tok, "eos_token_id", None),
-                    pad_token_id=getattr(tok, "pad_token_id", None),
+                    eos_id=eos_id,
+                    pad_id=pad_id,
                     bad_words_ids=bad_words_ids,
+                    strip_ids=strip_ids,
+                    json_stop_after=json_stop_after,
+                    use_json_early_stop=use_json_early_stop,
                 )
-
             torch.cuda.synchronize()
             t1 = time.perf_counter()
 
             latency = t1 - t0
             latencies.append(latency)
+            gen_lengths.append(gen_len_eff)
 
-            # Decode ONLY generated continuation
-            gen = out[0][prompt_len:]
-            gen_len = int(gen.shape[-1]) if hasattr(gen, "shape") else len(gen.tolist())
-            gen_lengths.append(gen_len)
-
-            gen_text_full = tok.decode(gen, skip_special_tokens=True).strip()
-
-            # Robust: parse first JSON object only
-            pred, blob = extract_first_json(gen_text_full)
-            raw_out_to_store = blob if blob is not None else gen_text_full
-
+            pred, blob = extract_first_json(gen_text)
             ok = isinstance(pred, dict)
             json_ok += int(ok)
-
             req_ok_rates.append(required_keys_rate(pred, required_keys))
 
-            # -----------------------
-            # Legacy schema metrics
-            # -----------------------
             if schema == "legacy_status" and ok and isinstance(tgt, dict):
-                t_status = str(tgt.get("status", "unknown"))
-                p_status = str(pred.get("status", "unknown"))
-                status_true.append(t_status)
-                status_pred.append(p_status)
-
+                status_true.append(str(tgt.get("status", "unknown")))
+                status_pred.append(str(pred.get("status", "unknown")))
                 t_dr = safe_list(tgt.get("drivers", []))
                 p_dr = safe_list(pred.get("drivers", []))
                 _, _, f1d = set_f1(p_dr, t_dr)
@@ -911,72 +1006,47 @@ def evaluate_one_run(
                 checks_f1.append(f1c)
                 checks_j.append(jaccard(p_ck, t_ck))
 
-                rouge_scores.append(
-                    rouge_l(str(pred.get("narrative", "")), str(tgt.get("narrative", "")))
-                )
+                rouge_scores.append(rouge_l(str(pred.get("narrative", "")), str(tgt.get("narrative", ""))))
 
-            # -----------------------
-            # PhysioNet 2019 sepsis metrics
-            # -----------------------
-            if schema == "p2019_sepsis" and isinstance(tgt, dict):
-                t_lab = extract_label(tgt, label_keys)
-                # allow a fallback if target is a plain number/string
-                if t_lab is None and not isinstance(tgt, dict):
-                    t_lab = _to_int_label(tgt)
-
+            if schema == "p2019_sepsis":
+                t_lab = extract_label(tgt, label_keys) if isinstance(tgt, dict) else _to_int_label(tgt)
                 p_lab = extract_label(pred, label_keys) if ok else None
                 p_prb = extract_prob(pred, prob_keys) if ok else None
 
-                # If only prob is present, derive label by threshold 0.5
                 if p_lab is None and p_prb is not None:
                     p_lab = 1 if p_prb >= 0.5 else 0
-
-                # If only label is present, set prob to label (still useful for Brier-ish)
                 if p_prb is None and p_lab is not None:
                     p_prb = float(p_lab)
 
-                # Accumulate only if we have ground truth + prediction label
                 if t_lab is not None and p_lab is not None:
                     y_true.append(int(t_lab))
                     y_pred.append(int(p_lab))
                     if p_prb is not None:
                         y_prob.append(float(p_prb))
 
-                    # optional factors overlap (if present on both)
-                    t_fac = extract_factors(tgt, factors_keys)
-                    p_fac = extract_factors(pred, factors_keys) if ok else []
-                    if t_fac or p_fac:
-                        _, _, ff1 = set_f1(p_fac, t_fac)
-                        factors_f1.append(ff1)
-                        factors_j.append(jaccard(p_fac, t_fac))
+            row = {
+                "prompt": prompt,
+                "target": tgt,
+                "raw_output": (blob if blob is not None else gen_text),
+                "pred_json": pred,
+                "latency_s": latency,
+                "gen_len_tokens": gen_len_eff,
+                "prompt_len_tokens": prompt_len,
+                "adapter_loaded": bool(adapter_loaded),
+                "schema": schema,
+                "encode_strategy": encode_strategy,
+                "encode_candidates_lens": enc_lens,
+                "encode_candidates_errors": enc_errs,
+            }
+            outf.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-                    # optional explanation rouge (if present on both)
-                    t_exp = tgt.get("explanation", tgt.get("rationale", tgt.get("narrative", "")))
-                    p_exp = pred.get("explanation", pred.get("rationale", pred.get("narrative", ""))) if ok else ""
-                    if str(t_exp).strip() or str(p_exp).strip():
-                        rouge_expl.append(rouge_l(str(p_exp), str(t_exp)))
-
-            outf.write(
-                json.dumps(
-                    {
-                        "prompt": prompt,
-                        "target": tgt,
-                        "raw_output": raw_out_to_store,
-                        "pred_json": pred,
-                        "latency_s": latency,
-                        "gen_len_tokens": gen_len,
-                        "prompt_len_tokens": prompt_len,
-                        "adapter_loaded": adapter_loaded,
-                        "schema": schema,
-                    },
-                    ensure_ascii=False,
+            if print_every and ((idx + 1) % print_every == 0):
+                print(
+                    f"[{run.name}] {idx+1}/{len(val_recs)}  "
+                    f"prompt_len={prompt_len}  gen_len={gen_len_eff}  "
+                    f"json_ok={json_ok}/{idx+1}  latency={latency:.2f}s"
                 )
-                + "\n"
-            )
 
-    # ---------------------------
-    # Aggregate metrics
-    # ---------------------------
     metrics: Dict[str, Any] = {
         "run_name": run.name,
         "mode": run.mode,
@@ -990,12 +1060,12 @@ def evaluate_one_run(
         "gen_len_tokens_mean": float(np.mean(gen_lengths)) if gen_lengths else 0.0,
     }
 
-    # Legacy metrics
     if schema == "legacy_status":
         metrics.update(
             {
                 "status_accuracy": float(np.mean([1 if a == b else 0 for a, b in zip(status_true, status_pred)]))
-                if status_true else 0.0,
+                if status_true
+                else 0.0,
                 "drivers_f1_mean": float(np.mean(drivers_f1)) if drivers_f1 else 0.0,
                 "checks_f1_mean": float(np.mean(checks_f1)) if checks_f1 else 0.0,
                 "drivers_jaccard_mean": float(np.mean(drivers_j)) if drivers_j else 0.0,
@@ -1004,7 +1074,6 @@ def evaluate_one_run(
             }
         )
 
-    # PhysioNet 2019 metrics
     if schema == "p2019_sepsis":
         if y_true:
             acc = float(np.mean([1 if a == b else 0 for a, b in zip(y_true, y_pred)]))
@@ -1023,14 +1092,10 @@ def evaluate_one_run(
                     "sepsis_f1": f1v,
                     "sepsis_balanced_accuracy": bal,
                     "sepsis_specificity": spec,
-                    "factors_f1_mean": float(np.mean(factors_f1)) if factors_f1 else 0.0,
-                    "factors_jaccard_mean": float(np.mean(factors_j)) if factors_j else 0.0,
-                    "rougeL_explanation_mean": float(np.mean(rouge_expl)) if rouge_expl else 0.0,
                 }
             )
 
-            # Probabilistic metrics only if we have probs for all scored samples
-            if len(y_prob) == len(y_true):
+            if len(y_prob) == len(y_true) and len(y_true) > 1:
                 try:
                     metrics["auroc"] = float(roc_auc_score(y_true, y_prob))
                 except Exception:
@@ -1043,194 +1108,38 @@ def evaluate_one_run(
                     metrics["brier"] = float(brier_score_loss(y_true, y_prob))
                 except Exception:
                     metrics["brier"] = 0.0
+            else:
+                metrics["auroc"] = 0.0
+                metrics["auprc"] = 0.0
+                metrics["brier"] = 0.0
         else:
-            metrics.update(
-                {
-                    "n_scored": 0,
-                    "sepsis_accuracy": 0.0,
-                    "sepsis_precision": 0.0,
-                    "sepsis_recall": 0.0,
-                    "sepsis_f1": 0.0,
-                    "sepsis_balanced_accuracy": 0.0,
-                    "sepsis_specificity": 0.0,
-                    "auroc": 0.0,
-                    "auprc": 0.0,
-                    "brier": 0.0,
-                    "factors_f1_mean": 0.0,
-                    "factors_jaccard_mean": 0.0,
-                    "rougeL_explanation_mean": 0.0,
-                }
-            )
+            metrics.update({"n_scored": 0, "sepsis_accuracy": 0.0, "sepsis_precision": 0.0, "sepsis_recall": 0.0,
+                            "sepsis_f1": 0.0, "sepsis_balanced_accuracy": 0.0, "sepsis_specificity": 0.0,
+                            "auroc": 0.0, "auprc": 0.0, "brier": 0.0})
 
-    # write metrics
     metrics_path = os.path.join(run_dir, "metrics.json")
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
-    # confusion matrix/report
-    if schema == "legacy_status":
-        labels = sorted(list(set(status_true) | set(status_pred))) if status_true else []
-        if labels:
-            cm = confusion_matrix(status_true, status_pred, labels=labels)
-            plot_confusion(cm, labels, os.path.join(run_dir, "status_confusion.png"), "Status confusion matrix")
-
-            rep = classification_report(status_true, status_pred, labels=labels, zero_division=0)
-            with open(os.path.join(run_dir, "status_report.txt"), "w", encoding="utf-8") as f:
-                f.write(rep)
-
     if schema == "p2019_sepsis" and y_true:
-        labels = ["0", "1"]
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-        plot_confusion(cm, labels, os.path.join(run_dir, "sepsis_confusion.png"), "Sepsis confusion matrix (0/1)")
-
+        plot_confusion(cm, ["0", "1"], os.path.join(run_dir, "sepsis_confusion.png"), "Sepsis confusion matrix (0/1)")
         rep = classification_report(y_true, y_pred, labels=[0, 1], zero_division=0)
         with open(os.path.join(run_dir, "sepsis_report.txt"), "w", encoding="utf-8") as f:
             f.write(rep)
 
-    # training curves (if exists)
     plot_training_curves(
         os.path.join(run.adapter_dir, "trainer_state.json"),
         os.path.join(run_dir, "training_loss.png"),
     )
-
-    # metric bar
-    if schema == "legacy_status":
-        bar_keys = [
-            "json_parse_rate",
-            "required_keys_rate_mean",
-            "status_accuracy",
-            "drivers_f1_mean",
-            "checks_f1_mean",
-            "rougeL_narrative_mean",
-        ]
-        plot_bar(metrics, bar_keys, os.path.join(run_dir, "metrics_bar.png"), f"Key metrics: {run.name}")
-
-    if schema == "p2019_sepsis":
-        bar_keys = [
-            "json_parse_rate",
-            "required_keys_rate_mean",
-            "sepsis_accuracy",
-            "sepsis_f1",
-            "sepsis_balanced_accuracy",
-        ]
-        if "auroc" in metrics:
-            bar_keys.append("auroc")
-        if "auprc" in metrics:
-            bar_keys.append("auprc")
-        plot_bar(metrics, bar_keys, os.path.join(run_dir, "metrics_bar.png"), f"Key metrics: {run.name}")
-
-    # summary markdown
-    md = [
-        f"# Evaluation summary — {run.name}",
-        "",
-        f"- Mode: **{run.mode}**",
-        f"- Adapter: **{run.adapter_dir}**",
-        f"- Adapter loaded: **{metrics['adapter_loaded']}**",
-        f"- Samples (loaded): **{metrics['samples']}**",
-        f"- Schema: **{metrics['schema']}**",
-        f"- JSON parse rate: **{metrics['json_parse_rate']:.3f}**",
-        f"- Required keys rate (mean): **{metrics['required_keys_rate_mean']:.3f}**",
-        f"- Mean latency (s): **{metrics['latency_s_mean']:.3f}**",
-        f"- Mean generated length (tokens): **{metrics['gen_len_tokens_mean']:.1f}**",
-        "",
-    ]
-
-    if schema == "legacy_status":
-        md += [
-            "## Legacy (status/drivers/checks) metrics",
-            f"- Status accuracy: **{metrics.get('status_accuracy', 0.0):.3f}**",
-            f"- Drivers F1 (mean): **{metrics.get('drivers_f1_mean', 0.0):.3f}**",
-            f"- Checks F1 (mean): **{metrics.get('checks_f1_mean', 0.0):.3f}**",
-            f"- ROUGE-L narrative (mean): **{metrics.get('rougeL_narrative_mean', 0.0):.3f}**",
-            "",
-            "Artifacts:",
-            "- metrics.json",
-            "- metrics_bar.png",
-            "- status_confusion.png (if status labels exist)",
-            "- status_report.txt (if status labels exist)",
-            "- training_loss.png (if trainer_state.json exists)",
-            "- sample_outputs.jsonl (raw output + parsed json + latency)",
-        ]
-
-    if schema == "p2019_sepsis":
-        md += [
-            "## PhysioNet 2019 (sepsis) metrics",
-            f"- Scored samples (with label+pred): **{metrics.get('n_scored', 0)}**",
-            f"- Accuracy: **{metrics.get('sepsis_accuracy', 0.0):.3f}**",
-            f"- Precision: **{metrics.get('sepsis_precision', 0.0):.3f}**",
-            f"- Recall: **{metrics.get('sepsis_recall', 0.0):.3f}**",
-            f"- F1: **{metrics.get('sepsis_f1', 0.0):.3f}**",
-            f"- Balanced accuracy: **{metrics.get('sepsis_balanced_accuracy', 0.0):.3f}**",
-            f"- Specificity: **{metrics.get('sepsis_specificity', 0.0):.3f}**",
-        ]
-        if "auroc" in metrics:
-            md.append(f"- AUROC: **{metrics.get('auroc', 0.0):.3f}**")
-        if "auprc" in metrics:
-            md.append(f"- AUPRC: **{metrics.get('auprc', 0.0):.3f}**")
-        if "brier" in metrics:
-            md.append(f"- Brier: **{metrics.get('brier', 0.0):.3f}**")
-
-        md += [
-            f"- Factors F1 (mean): **{metrics.get('factors_f1_mean', 0.0):.3f}**",
-            f"- Factors Jaccard (mean): **{metrics.get('factors_jaccard_mean', 0.0):.3f}**",
-            f"- ROUGE-L explanation (mean): **{metrics.get('rougeL_explanation_mean', 0.0):.3f}**",
-            "",
-            "Artifacts:",
-            "- metrics.json",
-            "- metrics_bar.png",
-            "- sepsis_confusion.png (if labels exist)",
-            "- sepsis_report.txt (if labels exist)",
-            "- training_loss.png (if trainer_state.json exists)",
-            "- sample_outputs.jsonl (raw output + parsed json + latency)",
-        ]
-
-    with open(os.path.join(run_dir, "summary.md"), "w", encoding="utf-8") as f:
-        f.write("\n".join(md))
 
     return metrics
 
 
 def write_combined_report(all_metrics: List[dict], out_dir: str):
     ensure_dir(out_dir)
-
     with open(os.path.join(out_dir, "all_metrics.json"), "w", encoding="utf-8") as f:
         json.dump(all_metrics, f, indent=2)
-
-    # Build a comparison table that works for both schemas
-    lines = [
-        "# Adapter comparison",
-        "",
-        "| run | mode | schema | adapter_loaded | json_parse | req_keys | acc | f1 | auroc | auprc | latency_s | gen_len |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for m in all_metrics:
-        schema = m.get("schema", "")
-        acc = m.get("sepsis_accuracy", m.get("status_accuracy", 0.0))
-        f1v = m.get("sepsis_f1", 0.0)
-        auroc = m.get("auroc", 0.0)
-        auprc = m.get("auprc", 0.0)
-        lines.append(
-            f"| {m['run_name']} | {m['mode']} | {schema} | {int(bool(m.get('adapter_loaded')))} | "
-            f"{m.get('json_parse_rate', 0.0):.3f} | {m.get('required_keys_rate_mean', 0.0):.3f} | "
-            f"{acc:.3f} | {f1v:.3f} | {auroc:.3f} | {auprc:.3f} | "
-            f"{m.get('latency_s_mean', 0.0):.3f} | {m.get('gen_len_tokens_mean', 0.0):.1f} |"
-        )
-
-    with open(os.path.join(out_dir, "comparison.md"), "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-    # Heuristic "best":
-    def _score(x):
-        return (
-            x.get("sepsis_f1", 0.0),
-            x.get("sepsis_accuracy", x.get("status_accuracy", 0.0)),
-            x.get("json_parse_rate", 0.0),
-        )
-
-    best = sorted(all_metrics, key=_score, reverse=True)[0] if all_metrics else None
-    if best:
-        with open(os.path.join(out_dir, "best.txt"), "w", encoding="utf-8") as f:
-            f.write(f"Best (heuristic): {best['run_name']}  mode={best['mode']}  schema={best.get('schema','')}\n")
 
 
 def main():
@@ -1238,34 +1147,33 @@ def main():
     ap.add_argument("--base_model", type=str, default="google/medgemma-1.5-4b-it")
     ap.add_argument("--val_jsonl", type=str, default="data/val.jsonl")
     ap.add_argument("--out_dir", type=str, default="reports_eval")
-    ap.add_argument("--max_new", type=int, default=320)
-    ap.add_argument("--max_len", type=int, default=1024, help="Max input tokens for truncation")
-    ap.add_argument("--max_samples", type=int, default=200)
+
+    # FAST DEFAULTS
+    ap.add_argument("--max_new", type=int, default=256)
+    ap.add_argument("--max_len", type=int, default=2048)
+    ap.add_argument("--max_samples", type=int, default=50)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--hf_token", type=str, default="")
+    ap.add_argument("--print_every", type=int, default=1)
 
-    # Task schema:
     ap.add_argument("--task", type=str, default="auto", choices=["auto", "p2019_sepsis", "legacy_status"])
+    ap.add_argument("--required_keys", type=str, default="sepsis_label")
 
-    # Required keys (used for required_keys_rate + prompt strengthening)
-    ap.add_argument(
-        "--required_keys",
-        type=str,
-        default="sepsis_label",
-        help="Comma-separated keys to require in model output JSON (also used in prompt strengthening).",
-    )
-
-    # Label/prob/factors keys for 2019 parsing (auto tries multiple keys)
     ap.add_argument("--label_keys", type=str, default=",".join(DEFAULT_LABEL_KEYS))
     ap.add_argument("--prob_keys", type=str, default=",".join(DEFAULT_PROB_KEYS))
     ap.add_argument("--factors_keys", type=str, default=",".join(DEFAULT_FACTORS_KEYS))
 
-    # Repeatable runs:
     ap.add_argument("--run", action="append", default=[], help='Repeat: "NAME|ADAPTER_DIR|MODE" where MODE is lora/qlora')
-
-    # Single-run fallback (optional)
     ap.add_argument("--adapter_dir", type=str, default="")
     ap.add_argument("--mode", type=str, default="", choices=["", "lora", "qlora"])
+
+    # IMPORTANT: stop wasting time when prompt_len is broken
+    ap.add_argument("--fail_on_short_prompt", action="store_true", help="Abort if prompt_len_tokens is tiny (recommended).")
+    ap.add_argument("--min_ok_prompt_len", type=int, default=64)
+
+    # JSON handling
+    ap.add_argument("--no_json_stop_after", action="store_true", help="Do not cut decoded output at first complete JSON.")
+    ap.add_argument("--json_early_stop", action="store_true", help="Stop generation early when JSON braces close.")
 
     args = ap.parse_args()
 
@@ -1296,10 +1204,7 @@ def main():
         )
 
     if not runs:
-        raise SystemExit(
-            "No runs specified. Use --run \"NAME|ADAPTER_DIR|MODE\" (repeatable) "
-            "or --adapter_dir + --mode."
-        )
+        raise SystemExit("No runs specified. Use --adapter_dir + --mode, or --run \"NAME|ADAPTER_DIR|MODE\".")
 
     val_recs = load_val(args.val_jsonl, args.max_samples, args.seed)
 
@@ -1321,13 +1226,17 @@ def main():
             label_keys=label_keys,
             prob_keys=prob_keys,
             factors_keys=factors_keys,
+            print_every=args.print_every,
+            fail_on_short_prompt=bool(args.fail_on_short_prompt),
+            min_ok_prompt_len=int(args.min_ok_prompt_len),
+            json_stop_after=(not args.no_json_stop_after),
+            use_json_early_stop=bool(args.json_early_stop),
         )
         all_metrics.append(m)
-        print(f"[ok] wrote metrics -> {os.path.join(args.out_dir, run.name, 'metrics.json')}")
+        print(f"[ok] metrics -> {os.path.join(args.out_dir, run.name, 'metrics.json')}")
 
     write_combined_report(all_metrics, args.out_dir)
-    print("[ok] wrote comparison ->", os.path.join(args.out_dir, "comparison.md"))
-    print("[ok] wrote all_metrics.json ->", os.path.join(args.out_dir, "all_metrics.json"))
+    print("[ok] all_metrics.json ->", os.path.join(args.out_dir, "all_metrics.json"))
 
 
 if __name__ == "__main__":
