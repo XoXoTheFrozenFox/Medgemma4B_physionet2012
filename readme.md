@@ -7,9 +7,16 @@
 <img src="https://github.com/user-attachments/assets/5ef29496-88e5-4de3-9ada-04b8fa8084cb" />
 <img src="https://github.com/user-attachments/assets/102cebdf-4772-412f-b272-2727f5483159" /> 
 <h2 align="center">Project architecture</h2>
-<img src="https://github.com/user-attachments/assets/f89fecec-e1ec-4f0f-9194-63bc65300965" />
+<img src="https://github.com/user-attachments/assets/1c1c7b81-a31b-4dbd-aa5c-09114abadd31" />
 <h2 align="center">API logs</h2>
 <img src="https://github.com/user-attachments/assets/4d619f17-351d-497c-bca2-d0ebf9616919" />
+<h2 align="center">Login</h2>
+<h3 align="center">Desktop</h3>
+<img src="https://github.com/user-attachments/assets/55fc44ff-cbe3-43bf-a661-242ea52e8fb8" />
+<h3 align="center">Web</h3>
+<img src="https://github.com/user-attachments/assets/97e0be98-8d39-4a69-822c-f91f59bf66d8" />
+<h3 align="center">Mobile</h3>
+<img src="https://github.com/user-attachments/assets/5e346585-6749-4dd3-9602-10d03ac5386d" />
 <h2 align="center">Desktop app output</h2>
 <img src="https://github.com/user-attachments/assets/2c5cf4b4-9de0-40ca-8f51-68d1cd64c6fd"" />
 <h2 align="center">Web app output</h2>
