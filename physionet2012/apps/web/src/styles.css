@@ -14,13 +14,21 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+}
+
 a { color: var(--red2); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 .app {
   height: 100vh;
-  padding: 18px 18px 24px; /* reduced bottom padding */
+  padding: 18px 18px 24px;
   background:
     radial-gradient(900px 500px at 12% 10%, rgba(255,45,45,0.18), transparent 60%),
     radial-gradient(900px 500px at 88% 85%, rgba(255,45,45,0.10), transparent 60%),
@@ -93,12 +101,15 @@ a:hover { text-decoration: underline; }
 
 .pill.ok { border-color: rgba(0,255,160,0.25); }
 .pill.bad { border-color: rgba(255,45,45,0.35); color: #ffd2d2; }
+.pill.dim { border-color: rgba(255,255,255,0.14); }
 
+/* ✅ FIX: stop height calc bugs + flex-fill properly (prevents weird layout + spinner warping) */
 .grid {
   display: grid;
   grid-template-columns: 1.05fr 0.95fr;
   gap: 14px;
-  height: calc(100vh - 18px - 24px - 76px - 14px);
+  flex: 1;
+  min-height: 0;
 }
 
 .card {
@@ -144,6 +155,7 @@ a:hover { text-decoration: underline; }
   transition: 150ms ease;
   font-weight: 650;
   font-size: 12px;
+  user-select: none;
 }
 
 .btn:hover {
@@ -165,6 +177,19 @@ a:hover { text-decoration: underline; }
 .primary:hover { box-shadow: var(--glow-strong); }
 
 .small { padding: 8px 10px; border-radius: 12px; font-weight: 650; font-size: 12px; }
+
+/* ✅ Nice disabled state so “Analyzing…” doesn’t look broken */
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.75;
+  transform: none;
+  box-shadow: none;
+}
+.btn:disabled:hover {
+  border-color: rgba(255,255,255,0.14);
+  box-shadow: none;
+  transform: none;
+}
 
 .body {
   padding: 12px 14px;
@@ -217,12 +242,20 @@ a:hover { text-decoration: underline; }
 
 .footerNote { color: var(--muted2); font-size: 11px; }
 
+/* ✅ FIX: spinner rendering (prevents squashing + ensures it rotates cleanly everywhere) */
+.inline { display: inline-flex; gap: 8px; align-items: center; }
+
 .spinner {
-  width: 16px; height: 16px;
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  flex: 0 0 16px;     /* prevents shrink */
   border-radius: 999px;
   border: 2px solid rgba(255,255,255,0.22);
   border-top-color: rgba(255,45,45,0.85);
   animation: spin 0.9s linear infinite;
+  transform-origin: center;
+  will-change: transform;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -233,4 +266,109 @@ a:hover { text-decoration: underline; }
   background: rgba(255,45,45,0.08);
   color: #ffd8d8;
   box-shadow: var(--glow);
+}
+
+/* ------------------------- */
+/* Auth gate (Firebase)      */
+/* ------------------------- */
+.authWrap{
+  flex: 1;
+  min-height: 0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.authCard{
+  width: 520px;
+  max-width: 100%;
+}
+
+.authBody{
+  display:flex;
+  flex-direction:column;
+  gap: 12px;
+}
+
+.authTop{
+  display:flex;
+  flex-direction:column;
+  gap: 4px;
+}
+
+.authTitle{
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+
+.authSub{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.authForm{
+  display:flex;
+  flex-direction:column;
+  gap: 10px;
+}
+
+.field{
+  display:flex;
+  flex-direction:column;
+  gap: 6px;
+}
+
+.fieldLabel{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.input{
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,45,45,0.35);
+  background: rgba(255,255,255,0.03);
+  color: var(--text);
+  outline: none;
+  transition: 150ms ease;
+}
+
+.input:focus{
+  border-color: rgba(255,45,45,0.70);
+  box-shadow: var(--glow);
+}
+
+.authBtns{
+  display:flex;
+  gap: 10px;
+  align-items:center;
+  flex-wrap: wrap;
+}
+
+.authSwitch{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.linkBtn{
+  appearance:none;
+  border: none;
+  background: transparent;
+  color: var(--red2);
+  cursor:pointer;
+  font-weight: 700;
+  padding: 0 2px;
+}
+
+.linkBtn:hover{
+  text-decoration: underline;
+}
+
+.infoBox{
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(0,255,160,0.25);
+  background: rgba(0,255,160,0.06);
+  color: rgba(255,255,255,0.9);
 }

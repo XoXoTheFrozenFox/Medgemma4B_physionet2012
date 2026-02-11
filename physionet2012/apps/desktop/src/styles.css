@@ -247,3 +247,49 @@ a:hover { text-decoration: underline; }
   color: #ffd8d8;
   box-shadow: var(--glow);
 }
+
+.authWrap{
+  flex: 1;
+  min-height: 0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.authCard{
+  width: 520px;
+  max-width: 100%;
+}
+
+.authBody{
+  display:flex;
+  flex-direction:column;
+  gap: 12px;
+  width: 100%;
+}
+
+.authTop{ display:flex; flex-direction:column; gap: 4px; }
+.authTitle{ font-weight: 800; letter-spacing: 0.2px; }
+.authSub{ font-size: 12px; color: var(--muted); }
+
+.authForm{ display:flex; flex-direction:column; gap: 10px; }
+.field{ display:flex; flex-direction:column; gap: 6px; }
+.fieldLabel{ font-size: 12px; color: var(--muted); }
+
+.input{
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,45,45,0.35);
+  background: rgba(255,255,255,0.03);
+  color: var(--text);
+  outline: none;
+  transition: 150ms ease;
+}
+
+.input:focus{
+  border-color: rgba(255,45,45,0.70);
+  box-shadow: var(--glow);
+}
+
+.authBtns{ display:flex; gap: 10px; align-items:center; flex-wrap: wrap; }

@@ -1,3 +1,4 @@
+// lib/main.dart
 import 'dart:async';
 import 'dart:convert';
 
@@ -5,6 +6,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 typedef Preset = String; // "quick" | "normal" | "detailed"
 
@@ -35,25 +39,14 @@ Pupils reportedly pinpoint. End-tidal CO2 rising; ABG shows hypercapnia with aci
 No known drug allergies. Concern for opioid-induced hypoventilation vs COPD/OSA overlap; consider naloxone and airway support.
 ''';
 
-
 /// Android emulator -> host machine localhost
 String get apiBase {
-  // Flutter Web runs in the browser; 127.0.0.1 is the machine running the browser.
-  // If you run the API on the same machine, this is fine.
-  // If you run Flutter Web on a different device, you need a LAN IP and CORS on the API.
   if (kIsWeb) return "http://127.0.0.1:8000";
-
-  // Android emulator special alias for host loopback
-  if (defaultTargetPlatform == TargetPlatform.android) {
-    return "http://10.0.2.2:8000";
-  }
-
-  // Windows/macOS/Linux desktop app
+  if (defaultTargetPlatform == TargetPlatform.android) return "http://10.0.2.2:8000";
   return "http://127.0.0.1:8000";
 }
 
 /// Model generation can take minutes; don't time out aggressively.
-/// (This is essentially "no timeout" for your use-case.)
 const Duration analyzeTimeout = Duration(hours: 5);
 
 /// Health endpoint should respond quickly.
@@ -98,12 +91,86 @@ class NeonTheme {
   }
 }
 
-void main() {
-  runApp(const MedGemmaApp());
+/// Reads Firebase web config from --dart-define.
+/// Required keys for web:
+/// - FIREBASE_API_KEY
+/// - FIREBASE_AUTH_DOMAIN
+/// - FIREBASE_PROJECT_ID
+/// - FIREBASE_STORAGE_BUCKET
+/// - FIREBASE_MESSAGING_SENDER_ID
+/// - FIREBASE_APP_ID
+FirebaseOptions? firebaseOptionsFromEnv({required bool requireAll}) {
+  const apiKey = String.fromEnvironment('FIREBASE_API_KEY');
+  const authDomain = String.fromEnvironment('FIREBASE_AUTH_DOMAIN');
+  const projectId = String.fromEnvironment('FIREBASE_PROJECT_ID');
+  const storageBucket = String.fromEnvironment('FIREBASE_STORAGE_BUCKET');
+  const messagingSenderId = String.fromEnvironment('FIREBASE_MESSAGING_SENDER_ID');
+  const appId = String.fromEnvironment('FIREBASE_APP_ID');
+
+  // Optional (mostly for analytics)
+  const measurementId = String.fromEnvironment('FIREBASE_MEASUREMENT_ID');
+
+  final missing = <String>[];
+  if (apiKey.isEmpty) missing.add('FIREBASE_API_KEY');
+  if (authDomain.isEmpty) missing.add('FIREBASE_AUTH_DOMAIN');
+  if (projectId.isEmpty) missing.add('FIREBASE_PROJECT_ID');
+  if (storageBucket.isEmpty) missing.add('FIREBASE_STORAGE_BUCKET');
+  if (messagingSenderId.isEmpty) missing.add('FIREBASE_MESSAGING_SENDER_ID');
+  if (appId.isEmpty) missing.add('FIREBASE_APP_ID');
+
+  if (missing.isNotEmpty) {
+    if (requireAll) {
+      throw Exception(
+        "Missing --dart-define values:\n- ${missing.join("\n- ")}\n\n"
+        "Example:\n"
+        "--dart-define=FIREBASE_API_KEY=... --dart-define=FIREBASE_AUTH_DOMAIN=... etc",
+      );
+    }
+    return null;
+  }
+
+  return FirebaseOptions(
+    apiKey: apiKey,
+    authDomain: authDomain,
+    projectId: projectId,
+    storageBucket: storageBucket,
+    messagingSenderId: messagingSenderId,
+    appId: appId,
+    measurementId: measurementId.isEmpty ? null : measurementId,
+  );
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  String? initError;
+
+  try {
+    if (kIsWeb) {
+      // Web ALWAYS needs explicit options.
+      final opts = firebaseOptionsFromEnv(requireAll: true)!;
+      await Firebase.initializeApp(options: opts);
+    } else {
+      // Non-web: try platform default first (google-services.json / plist / etc).
+      // If that isn’t configured, fallback to --dart-define options if provided.
+      try {
+        await Firebase.initializeApp();
+      } catch (_) {
+        final opts = firebaseOptionsFromEnv(requireAll: false);
+        if (opts == null) rethrow;
+        await Firebase.initializeApp(options: opts);
+      }
+    }
+  } catch (e) {
+    initError = e.toString();
+  }
+
+  runApp(MedGemmaApp(firebaseInitError: initError));
 }
 
 class MedGemmaApp extends StatelessWidget {
-  const MedGemmaApp({super.key});
+  const MedGemmaApp({super.key, required this.firebaseInitError});
+  final String? firebaseInitError;
 
   @override
   Widget build(BuildContext context) {
@@ -124,13 +191,361 @@ class MedGemmaApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: "Triage Assist-SA:",
       theme: theme,
-      home: const HomePage(),
+      home: AuthGate(firebaseInitError: firebaseInitError),
     );
   }
 }
 
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key, required this.firebaseInitError});
+  final String? firebaseInitError;
+
+  @override
+  Widget build(BuildContext context) {
+    if (firebaseInitError != null && firebaseInitError!.trim().isNotEmpty) {
+      return _ConfigErrorPage(message: firebaseInitError!);
+    }
+
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const _LoadingPage();
+        }
+        final user = snap.data;
+        if (user == null) return const _AuthPage();
+        return HomePage(user: user);
+      },
+    );
+  }
+}
+
+/* ------------------ auth pages ------------------ */
+
+class _LoadingPage extends StatelessWidget {
+  const _LoadingPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: const [
+          _BackgroundGlow(),
+          SafeArea(
+            child: Center(
+              child: SizedBox(
+                width: 420,
+                child: _NeonCard(
+                  child: Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text("🔐 Loading session…",
+                            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
+                        SizedBox(height: 10),
+                        _PillDim(text: "Checking Firebase session…"),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConfigErrorPage extends StatelessWidget {
+  const _ConfigErrorPage({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          const _BackgroundGlow(),
+          SafeArea(
+            child: Center(
+              child: SizedBox(
+                width: 720,
+                child: _NeonCard(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text("⚙️ Firebase init error",
+                            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
+                        const SizedBox(height: 10),
+                        _OutputBox(
+                          controller: ScrollController(),
+                          text: message,
+                          fill: NeonTheme.boxFill2,
+                          textStyle: TextStyle(color: NeonTheme.muted, fontSize: 12, height: 1.35),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          "Fix your --dart-define values (web) or platform config (mobile/desktop) then restart.",
+                          style: TextStyle(color: NeonTheme.muted2, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AuthPage extends StatefulWidget {
+  const _AuthPage();
+
+  @override
+  State<_AuthPage> createState() => _AuthPageState();
+}
+
+class _AuthPageState extends State<_AuthPage> {
+  final emailCtrl = TextEditingController();
+  final passCtrl = TextEditingController();
+
+  bool creating = false;
+  bool busy = false;
+  String error = "";
+
+  @override
+  void dispose() {
+    emailCtrl.dispose();
+    passCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    setState(() {
+      busy = true;
+      error = "";
+    });
+
+    final email = emailCtrl.text.trim();
+    final pass = passCtrl.text;
+
+    if (email.isEmpty || pass.isEmpty) {
+      setState(() {
+        busy = false;
+        error = "Enter email + password.";
+      });
+      return;
+    }
+
+    try {
+      if (creating) {
+        await FirebaseAuth.instance.createUserWithEmailAndPassword(email: email, password: pass);
+      } else {
+        await FirebaseAuth.instance.signInWithEmailAndPassword(email: email, password: pass);
+      }
+    } on FirebaseAuthException catch (e) {
+      setState(() {
+        error = e.message ?? e.code;
+      });
+    } catch (e) {
+      setState(() {
+        error = e.toString();
+      });
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          const _BackgroundGlow(),
+          SafeArea(
+            child: Center(
+              child: SizedBox(
+                width: 520,
+                child: _NeonCard(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          creating ? "🔐 Create account" : "🔐 Sign in",
+                          style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          "Demo auth gate (email/password).",
+                          style: TextStyle(color: NeonTheme.muted, fontSize: 12),
+                        ),
+                        const SizedBox(height: 12),
+
+                        _LabeledField(
+                          label: "Email",
+                          child: _NeonInput(
+                            controller: emailCtrl,
+                            hint: "name@example.com",
+                            keyboardType: TextInputType.emailAddress,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        _LabeledField(
+                          label: "Password",
+                          child: _NeonInput(
+                            controller: passCtrl,
+                            hint: "••••••••",
+                            obscure: true,
+                          ),
+                        ),
+
+                        const SizedBox(height: 12),
+                        _PrimaryButton(
+                          label: busy ? "Please wait…" : (creating ? "Create account" : "Sign in"),
+                          loading: busy,
+                          onTap: busy ? null : _submit,
+                        ),
+
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 180),
+                          child: error.isEmpty
+                              ? const SizedBox(height: 8)
+                              : Padding(
+                                  padding: const EdgeInsets.only(top: 10),
+                                  child: _Toast(text: error),
+                                ),
+                        ),
+
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              creating ? "Already have an account?" : "Need an account?",
+                              style: TextStyle(color: NeonTheme.muted, fontSize: 12),
+                            ),
+                            TextButton(
+                              onPressed: busy
+                                  ? null
+                                  : () => setState(() {
+                                        creating = !creating;
+                                        error = "";
+                                      }),
+                              child: Text(
+                                creating ? "Sign in" : "Create one",
+                                style: TextStyle(color: NeonTheme.red2, fontWeight: FontWeight.w900),
+                              ),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          "Users appear in Firebase Console → Authentication → Users.",
+                          style: TextStyle(color: NeonTheme.muted2, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LabeledField extends StatelessWidget {
+  const _LabeledField({required this.label, required this.child});
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
+        const SizedBox(height: 6),
+        child,
+      ],
+    );
+  }
+}
+
+class _NeonInput extends StatefulWidget {
+  const _NeonInput({
+    required this.controller,
+    required this.hint,
+    this.keyboardType,
+    this.obscure = false,
+  });
+
+  final TextEditingController controller;
+  final String hint;
+  final TextInputType? keyboardType;
+  final bool obscure;
+
+  @override
+  State<_NeonInput> createState() => _NeonInputState();
+}
+
+class _NeonInputState extends State<_NeonInput> {
+  final FocusNode focus = FocusNode();
+
+  @override
+  void dispose() {
+    focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final focused = focus.hasFocus;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: NeonTheme.red.withOpacity(focused ? 0.70 : 0.26)),
+        color: NeonTheme.boxFill,
+        boxShadow: focused ? [NeonTheme.glow()] : [],
+      ),
+      clipBehavior: Clip.antiAlias,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: TextField(
+        controller: widget.controller,
+        focusNode: focus,
+        keyboardType: widget.keyboardType,
+        obscureText: widget.obscure,
+        style: const TextStyle(color: NeonTheme.text, height: 1.35),
+        decoration: InputDecoration(
+          border: InputBorder.none,
+          hintText: widget.hint,
+          hintStyle: const TextStyle(color: Color(0x80FFFFFF)),
+        ),
+      ),
+    );
+  }
+}
+
+/* ------------------ main app ------------------ */
+
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, required this.user});
+  final User user;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -166,9 +581,8 @@ class _HomePageState extends State<HomePage>
 
     _client = http.Client();
 
-    sweepCtrl =
-        AnimationController(vsync: this, duration: const Duration(milliseconds: 5500))
-          ..repeat();
+    sweepCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 5500))
+      ..repeat();
 
     _refreshHealth();
     _startHealthTimer();
@@ -200,8 +614,7 @@ class _HomePageState extends State<HomePage>
 
   void _startHealthTimer() {
     healthTimer?.cancel();
-    healthTimer =
-        Timer.periodic(const Duration(seconds: 12), (_) => _refreshHealth());
+    healthTimer = Timer.periodic(const Duration(seconds: 12), (_) => _refreshHealth());
   }
 
   void _stopHealthTimer() {
@@ -251,14 +664,10 @@ class _HomePageState extends State<HomePage>
     req.headers.addAll({
       "Content-Type": "application/json",
       "Accept": "application/json",
-      // DO NOT force "Connection: close" for long responses; can behave oddly on some stacks
     });
     req.bodyBytes = utf8.encode(jsonEncode(body));
 
-    // Send request (timeout applies to the whole call below)
     final streamed = await _client.send(req).timeout(timeout);
-
-    // Read entire body (this future completes when server finishes sending)
     final bodyText = await streamed.stream.transform(utf8.decoder).join().timeout(timeout);
 
     sw.stop();
@@ -269,15 +678,10 @@ class _HomePageState extends State<HomePage>
     }
 
     final trimmed = bodyText.trim();
-    try {
-      final decoded = jsonDecode(trimmed);
-      if (decoded is Map<String, dynamic>) return decoded;
-      throw Exception("Expected JSON object, got ${decoded.runtimeType}");
-    } catch (e) {
-      // Help debug if server returned non-JSON (streaming/text/etc.)
-      final preview = trimmed.length > 600 ? "${trimmed.substring(0, 600)}…" : trimmed;
-      throw Exception("Failed to decode JSON: $e\nResponse preview:\n$preview");
-    }
+    final decoded = jsonDecode(trimmed);
+    if (decoded is Map<String, dynamic>) return decoded;
+
+    throw Exception("Expected JSON object, got ${decoded.runtimeType}");
   }
 
   Future<void> _refreshHealth() async {
@@ -330,8 +734,6 @@ class _HomePageState extends State<HomePage>
         "preset": preset,
         "note": note,
         "debug": true,
-        // If your backend supports it, you can force non-streaming with:
-        // "stream": false,
       };
 
       final res = await _httpPostJsonLong(
@@ -348,9 +750,7 @@ class _HomePageState extends State<HomePage>
       if (!mounted) return;
       setState(() {
         reply = cleaned;
-        meta = (res["meta"] is Map<String, dynamic>)
-            ? (res["meta"] as Map<String, dynamic>)
-            : null;
+        meta = (res["meta"] is Map<String, dynamic>) ? (res["meta"] as Map<String, dynamic>) : null;
       });
 
       await Future.delayed(const Duration(milliseconds: 30));
@@ -378,6 +778,12 @@ class _HomePageState extends State<HomePage>
     } catch (_) {}
   }
 
+  Future<void> _logout() async {
+    try {
+      await FirebaseAuth.instance.signOut();
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
@@ -392,7 +798,13 @@ class _HomePageState extends State<HomePage>
               padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
               child: Column(
                 children: [
-                  _Header(sweep: sweepCtrl, apiReady: apiReady, health: health),
+                  _Header(
+                    sweep: sweepCtrl,
+                    apiReady: apiReady,
+                    health: health,
+                    userEmail: widget.user.email ?? "Signed in",
+                    onLogout: _logout,
+                  ),
                   const SizedBox(height: 12),
                   Expanded(
                     child: isMobile ? _mobileTabs() : _desktopSplit(),
@@ -419,8 +831,7 @@ class _HomePageState extends State<HomePage>
             Container(
               padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
               decoration: BoxDecoration(
-                border:
-                    Border(bottom: BorderSide(color: Colors.white.withOpacity(0.10))),
+                border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.10))),
               ),
               child: Column(
                 children: [
@@ -440,9 +851,7 @@ class _HomePageState extends State<HomePage>
                     runSpacing: 6,
                     children: [
                       Text("Preset: ", style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
-                      Text(preset,
-                          style:
-                              const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
+                      Text(preset, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
                       Text("•", style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
                       Text(presetHint, style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
                     ],
@@ -555,8 +964,7 @@ class _HomePageState extends State<HomePage>
                               disabled: meta == null,
                               onTap: meta == null
                                   ? null
-                                  : () => _copyText(
-                                      const JsonEncoder.withIndent("  ").convert(meta)),
+                                  : () => _copyText(const JsonEncoder.withIndent("  ").convert(meta)),
                             ),
                           ],
                         ),
@@ -588,8 +996,7 @@ class _HomePageState extends State<HomePage>
                             text: meta == null
                                 ? "Meta will appear here when debug=true."
                                 : const JsonEncoder.withIndent("  ").convert(meta),
-                            textStyle:
-                                TextStyle(color: NeonTheme.muted, fontSize: 12, height: 1.35),
+                            textStyle: TextStyle(color: NeonTheme.muted, fontSize: 12, height: 1.35),
                           ),
                         ),
                       ],
@@ -667,9 +1074,7 @@ class _HomePageState extends State<HomePage>
                     runSpacing: 6,
                     children: [
                       Text("Preset:", style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
-                      Text(preset,
-                          style:
-                              const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
+                      Text(preset, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
                       Text("•", style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
                       Text(presetHint, style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
                     ],
@@ -751,9 +1156,7 @@ class _HomePageState extends State<HomePage>
               _SmallButton(
                 label: "Copy meta",
                 disabled: meta == null,
-                onTap: meta == null
-                    ? null
-                    : () => _copyText(const JsonEncoder.withIndent("  ").convert(meta)),
+                onTap: meta == null ? null : () => _copyText(const JsonEncoder.withIndent("  ").convert(meta)),
               ),
             ],
           ),
@@ -847,11 +1250,19 @@ class _BackgroundGlow extends StatelessWidget {
 /* ------------------ header ------------------ */
 
 class _Header extends StatelessWidget {
-  const _Header({required this.sweep, required this.apiReady, required this.health});
+  const _Header({
+    required this.sweep,
+    required this.apiReady,
+    required this.health,
+    required this.userEmail,
+    required this.onLogout,
+  });
 
   final Animation<double> sweep;
   final bool apiReady;
   final Map<String, dynamic>? health;
+  final String userEmail;
+  final VoidCallback onLogout;
 
   double _lerp(double a, double b, double t) => a + (b - a) * t;
 
@@ -895,8 +1306,10 @@ class _Header extends StatelessWidget {
                                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
                                 ),
                                 const SizedBox(height: 3),
-                                Text("AI Clinical Decision Support For ICU Patient Care 🫀",
-                                    style: TextStyle(color: NeonTheme.muted, fontSize: 12)),
+                                Text(
+                                  "AI Clinical Decision Support For ICU Patient Care 🫀",
+                                  style: TextStyle(color: NeonTheme.muted, fontSize: 12),
+                                ),
                               ],
                             ),
                           ),
@@ -910,6 +1323,8 @@ class _Header extends StatelessWidget {
                           _Pill(text: apiReady ? "API: Ready" : "API: Offline", ok: apiReady),
                           _Pill(text: gpu.isNotEmpty ? "GPU: $gpu" : "GPU: n/a"),
                           _Pill(text: q4 == true ? "4-bit: Yes" : (q4 == false ? "4-bit: No" : "4-bit: ?")),
+                          _PillDim(text: userEmail),
+                          _SmallButton(label: "Logout", onTap: onLogout),
                         ],
                       ),
                     ],
@@ -930,6 +1345,15 @@ class _Header extends StatelessWidget {
                             Text(
                               "Local inference • Quick / Normal / Detailed • Neon Red Theme 🫀",
                               style: TextStyle(color: NeonTheme.muted, fontSize: 12),
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 10,
+                              runSpacing: 8,
+                              children: [
+                                _PillDim(text: userEmail),
+                                _SmallButton(label: "Logout", onTap: onLogout),
+                              ],
                             ),
                           ],
                         ),
@@ -1043,8 +1467,10 @@ class _CardHeader extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Text("$emoji  $title",
-              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, letterSpacing: 0.2)),
+          Text(
+            "$emoji  $title",
+            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, letterSpacing: 0.2),
+          ),
           const Spacer(),
           Wrap(spacing: 10, runSpacing: 8, children: actions),
         ],
@@ -1071,8 +1497,10 @@ class _CardHeaderCompact extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text("$emoji  $title",
-              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 0.2)),
+          Text(
+            "$emoji  $title",
+            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 0.2),
+          ),
           const SizedBox(height: 8),
           Wrap(spacing: 10, runSpacing: 8, children: actions),
         ],
@@ -1324,9 +1752,7 @@ class _PrimaryButtonState extends State<_PrimaryButton> {
               NeonTheme.red.withOpacity(bot),
             ],
           ),
-          boxShadow: canTap
-              ? [hot ? NeonTheme.glowStrong() : NeonTheme.glow(strength: 0.85)]
-              : [],
+          boxShadow: canTap ? [hot ? NeonTheme.glowStrong() : NeonTheme.glow(strength: 0.85)] : [],
         ),
         padding: const EdgeInsets.symmetric(vertical: 14),
         alignment: Alignment.center,

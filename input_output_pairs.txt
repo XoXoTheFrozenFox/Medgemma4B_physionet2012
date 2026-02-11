@@ -1,0 +1,133 @@
+**Input 1**:
+58M in ICU, POD2 after abdominal surgery. CKD baseline creatinine ~140.
+
+Recent (last 4–6h):
+- Vitals trending worse: HR 110→132, BP 108/62→86/46 (MAP 74→60), RR 22→32, Temp 38.1→38.9
+- SpO2 95→90 despite FiO2 up to ~0.60
+- Urine output dropping: ~45→12 mL/hr
+- Mental status: more drowsy/confused (GCS ~15→13)
+
+Labs/ABG:
+- Lactate 3.1→4.2
+- WBC 19.0
+- Creatinine 210 (baseline ~140)
+- ABG (FiO2 ~0.60): pH 7.28, PaCO2 33, HCO3 16, PaO2 60
+
+Tx so far: 1 L crystalloid given; antibiotics ordered but not yet given; no vasopressors.
+**Output 1**:
+Status: WORSENING
+Why:
+- Worsening respiratory function (RR 32, SpO2 90)
+- Worsening renal function (Creatinine 210, urine output dropping)
+- Worsening infection (WBC 19.0, Temp 38.9)
+- Worsening hemodynamic instability (Lactate 4.2)
+Immediate Actions:
+- Review oxygen delivery.
+- Consider ABG analysis.
+- Review urine/nephrotoxins.
+- Review renal function trends.
+- Assess peritonitis.
+- Review cultures if any.
+- Review antibiotics if any.
+- Check source control.
+Red Flags:
+- Possible hemo-pneumothorax (SpO2 90, RR 32)
+- Possible renal dysfunction
+- Possible infection
+- Worsening hemodynamic instability
+Missing Data:
+- Oxygen saturation trend
+- Lung sounds
+- Peritoneal signs
+- Cultures if any
+- Antibiotics if any
+- Source
+**Input 2**:
+34F in ICU after asthma exacerbation, improving over the last shift.
+
+Recent (last 6h):
+- Vitals improving: HR 112→88, RR 28→18, BP stable ~118/72 (MAP ~90), afebrile (Temp ~36.8)
+- SpO2 92→97 on low O2 (nasal cannula 2 L or FiO2 ~0.28–0.30)
+- Breathing effort reduced; speaking full sentences
+
+Labs/ABG:
+- WBC 9.4
+- Lactate 1.1
+- ABG: pH 7.40, PaCO2 40, PaO2 92 (on low O2)
+
+I/O: urine output adequate.
+Tx: bronchodilators q4h, steroids started yesterday, no pressors/antibiotics.
+**Output 2**:
+Status: STABLE
+Why:
+- Vitals improving
+- SpO2 stable on low O2
+- Breathing effort reduced but speaking full sentences
+- No signs of infection
+
+Immediate Actions:
+- Continue low O2 support
+- Monitor respiratory status
+- Review bronchodilator administration
+- Review steroid effect if available
+- Ensure adequate hydration
+
+Red Flags: 0
+Missing Data: None
+**Input 3**:
+76M in ICU with worsening shortness of breath overnight. Background: IHD, AF, T2DM (allergies unknown).
+Limited charting available.
+
+Most recent documented:
+- HR 110 irregular, BP 102/58 (MAP 73), RR 24, Temp 37.9, SpO2 93% on face mask 6 L
+- New confusion reported by nurse
+- Crackles bilaterally; mild leg edema
+
+Labs (8h old):
+- WBC 12.8
+- Creatinine 130 (baseline unknown)
+- No lactate result
+- No ABG result
+- No documented urine output or fluid balance
+- No CXR result recorded
+
+Tx so far: furosemide given once; antibiotics considered but not started; no cultures documented.
+**OUTPUT 3**
+Status: WORSENING
+Why:
+- Worsening respiratory status (RR 24, SpO2 93%, crackles)
+- Worsening renal function (Creatinine 130)
+- Worsening infection markers (WBC 12.8)
+- New confusion
+
+Immediate Actions:
+- Review oxygen delivery
+- Consider ABG if available
+- Review CXR if available
+- Review urine output/fluid balance if available
+- Review creatinine trend
+- Review cultures if any
+- Review antibiotics if any
+- Check source control
+
+Red Flags:
+- Possible respiratory compromise
+- Possible renal dysfunction
+- Possible infection
+- Possible neurological changes (confusion)
+Missing Data:
+- Oxygen saturation trend
+- CXR findings
+- Urine output if available
+- Fluid balance if available
+- Creatinine trend
+- Cultures if any
+- Antibiotics if any
+- Source control review
+worsening_status_worsening
+worsening_respiratory_status
+worsening
+worsening_respiratory_status
+worsening_renal_function
+worsening_infection_markers
+worsening_neurological_changes

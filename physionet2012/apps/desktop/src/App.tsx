@@ -1,5 +1,10 @@
+// src/App.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { onAuthStateChanged, signOut, type User } from "firebase/auth";
+import { auth, firebaseInitError } from "./firebase";
+import AuthPage from "./AuthPage";
+import type { AnalyzeRes } from "./types/medapi";
 
 type Preset = "quick" | "normal" | "detailed";
 
@@ -26,7 +31,6 @@ CONTEXT:
 Exam: diffuse wheeze, crackles RLL, accessory muscle use.
 CRP 160. CXR: RLL consolidation. No known drug allergies.
 `;
-
 
 const DEFAULT_API_BASE = "http://127.0.0.1:8000";
 
@@ -59,15 +63,14 @@ async function httpPostJson(url: string, body: any) {
 
 function stripAngleTags(s: string): string {
   if (!s) return "";
-  return s
-    // remove wrapper tags like <BL> </BL> <Answer> </Answer> <end_of_turn> etc
-    .replace(/<\/?[^>]+>/g, "")
-    // optional: collapse big blank gaps
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return s.replace(/<\/?[^>]+>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export default function App() {
+  // ✅ Firebase Auth state
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+
   const [preset, setPreset] = useState<Preset>("quick");
   const [note, setNote] = useState<string>(SAMPLE_NOTE);
   const [reply, setReply] = useState<string>("");
@@ -86,9 +89,22 @@ export default function App() {
 
   const ipcAvailable = !!window.medapi?.health && !!window.medapi?.analyze;
 
+  // ✅ Auth subscription (guard against missing firebase config)
+  useEffect(() => {
+    if (!auth) {
+      setAuthLoading(false);
+      setUser(null);
+      return;
+    }
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoading(false);
+    });
+    return () => unsub();
+  }, []);
+
   async function refreshHealth() {
     try {
-      // ✅ Prefer IPC, fallback to direct HTTP so UI still works.
       const h = ipcAvailable
         ? await window.medapi!.health()
         : await httpGetJson(`${DEFAULT_API_BASE}/health`);
@@ -122,12 +138,17 @@ export default function App() {
     try {
       const payload = { preset, note, debug: true };
 
-      const res = ipcAvailable
-        ? await window.medapi!.analyze(payload)
-        : { ok: true, data: await httpPostJson(`${DEFAULT_API_BASE}/v1/analyze`, payload) };
+      let res: AnalyzeRes;
 
-      if (!res?.ok) {
-        setError(res?.error || "Unknown error.");
+      if (ipcAvailable) {
+        res = await window.medapi!.analyze(payload);
+      } else {
+        const data = await httpPostJson(`${DEFAULT_API_BASE}/v1/analyze`, payload);
+        res = { ok: true, data };
+      }
+
+      if (!res.ok) {
+        setError(res.error || "Unknown error.");
         return;
       }
 
@@ -141,7 +162,7 @@ export default function App() {
   }
 
   async function copy(kind: "reply" | "meta") {
-    const text = kind === "reply" ? (reply || "") : safeStr(meta ?? {});
+    const text = kind === "reply" ? reply || "" : safeStr(meta ?? {});
     try {
       if (window.medapi?.copyText) {
         await window.medapi.copyText(text);
@@ -151,193 +172,264 @@ export default function App() {
     } catch {}
   }
 
+  async function doLogout() {
+    try {
+      if (auth) await signOut(auth);
+      setReply("");
+      setMeta(null);
+      setError("");
+    } catch {}
+  }
+
   const apiReady = !!health?.ok;
 
   return (
     <div className="app">
       <div className="topGlow" />
 
-      <div className="header">
-        <div className="brand">
-          <div className="logoPulse">
-            <div className="logo">🩺</div>
-          </div>
-          <div className="title">
-            <h1>Triage Assist-SA:</h1>
-            <span>
-              AI Clinical Decision Support For ICU Patient Care 🫀{" "}
-              <span style={{ opacity: 0.7 }}>
-                {ipcAvailable ? "• IPC OK" : "• IPC off (HTTP fallback)"}
-              </span>
-            </span>
-          </div>
-        </div>
-
-        <div className="status">
-          <span className={"pill " + (apiReady ? "ok" : "bad")}>
-            {apiReady ? "API: Ready" : "API: Offline"}
-          </span>
-          <span className="pill">{health?.gpu ? `GPU: ${health.gpu}` : "GPU: n/a"}</span>
-          <span className="pill">
-            {health?.is_loaded_in_4bit === true
-              ? "4-bit: Yes"
-              : health?.is_loaded_in_4bit === false
-              ? "4-bit: No"
-              : "4-bit: ?"}
-          </span>
-        </div>
-      </div>
-
-      <div className="grid">
-        {/* LEFT */}
-        <div className="card">
-          <div className="cardHead">
-            <div className="cardTitle">
-              <span className="emoji">🧾</span> Clinical note input
+      {/* ✅ Hide header unless logged in (clean demo) */}
+      {user && (
+        <div className="header">
+          <div className="brand">
+            <div className="logoPulse">
+              <div className="logo">🩺</div>
             </div>
-            <div className="controls">
-              <button className="btn small" onClick={() => setNote(SAMPLE_NOTE)}>
-                Load sample
-              </button>
-              <button
-                className="btn small"
-                onClick={() => {
-                  setNote("");
-                  setReply("");
-                  setMeta(null);
-                  setError("");
-                }}
-              >
-                Clear
-              </button>
-            </div>
-          </div>
-
-          <div className="body">
-            <textarea
-              className="textarea"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Paste or type the clinical note / case details here..."
-            />
-
-            <div className="metaRow">
+            <div className="title">
+              <h1>Triage Assist-SA:</h1>
               <span>
-                Preset: <strong>{preset}</strong>
+                AI Clinical Decision Support For ICU Patient Care 🫀{" "}
+                <span style={{ opacity: 0.7 }}>
+                  {ipcAvailable ? "• IPC OK" : "• IPC off (HTTP fallback)"}
+                </span>
               </span>
-              <span>•</span>
-              <span>{presetHint}</span>
-              <span>•</span>
-              <span className="muted">Tip: vitals + labs early 🧪 • imaging pending 🩻</span>
             </div>
+          </div>
 
-            <div className="btnRow">
-              <motion.button
-                className={"btn " + (preset === "quick" ? "btnActive" : "")}
-                onClick={() => setPreset("quick")}
-                whileHover={{ y: -1 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                ⚡ Quick
-              </motion.button>
+          <div className="status">
+            <span className={"pill " + (apiReady ? "ok" : "bad")}>
+              {apiReady ? "API: Ready" : "API: Offline"}
+            </span>
+            <span className="pill">{health?.gpu ? `GPU: ${health.gpu}` : "GPU: n/a"}</span>
+            <span className="pill">
+              {health?.is_loaded_in_4bit === true
+                ? "4-bit: Yes"
+                : health?.is_loaded_in_4bit === false
+                ? "4-bit: No"
+                : "4-bit: ?"}
+            </span>
 
-              <motion.button
-                className={"btn " + (preset === "normal" ? "btnActive" : "")}
-                onClick={() => setPreset("normal")}
-                whileHover={{ y: -1 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                📋 Normal
-              </motion.button>
+            {firebaseInitError ? (
+              <span className="pill bad">Auth: config error</span>
+            ) : authLoading ? (
+              <span className="pill dim">Auth: checking…</span>
+            ) : (
+              <>
+                <span className="pill dim">{user?.email ?? "Signed in"}</span>
+                <button className="btn small" onClick={doLogout}>
+                  Logout
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
-              <motion.button
-                className={"btn " + (preset === "detailed" ? "btnActive" : "")}
-                onClick={() => setPreset("detailed")}
-                whileHover={{ y: -1 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                🧠 Detailed
-              </motion.button>
-
-              <div style={{ flex: 1 }} />
-
-              <motion.button
-                className="btn primary"
-                onClick={runAnalyze}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                disabled={loading}
-              >
-                {loading ? (
-                  <span className="inline">
-                    <span className="spinner" /> Analyzing…
-                  </span>
-                ) : (
-                  "▶ Analyze"
-                )}
-              </motion.button>
+      {/* ✅ Auth gate */}
+      {firebaseInitError ? (
+        <div className="authWrap">
+          <div className="card authCard">
+            <div className="cardHead">
+              <div className="cardTitle">
+                <span className="emoji">⚙️</span> Firebase config error
+              </div>
             </div>
-
-            <AnimatePresence>
-              {!!error && (
-                <motion.div
-                  className="toast"
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 8 }}
-                  transition={{ duration: 0.18 }}
+            <div className="body">
+              <div className="output">{firebaseInitError}</div>
+              <div className="footerNote">
+                Fix <strong>.env.local</strong> then restart: <strong>npm run dev</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : authLoading ? (
+        <div className="authWrap">
+          <div className="card authCard">
+            <div className="cardHead">
+              <div className="cardTitle">
+                <span className="emoji">🔐</span> Loading session…
+              </div>
+            </div>
+            <div className="body">
+              <div className="output">Checking Firebase session…</div>
+            </div>
+          </div>
+        </div>
+      ) : !user ? (
+        <div className="authWrap">
+          <div className="card authCard">
+            <div className="cardHead">
+              <div className="cardTitle">
+                <span className="emoji">🔐</span> Sign in to continue
+              </div>
+            </div>
+            <div className="body">
+              <AuthPage />
+              <div className="footerNote">Firebase Console → Authentication → Users</div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="grid">
+          {/* LEFT */}
+          <div className="card">
+            <div className="cardHead">
+              <div className="cardTitle">
+                <span className="emoji">🧾</span> Clinical note input
+              </div>
+              <div className="controls">
+                <button className="btn small" onClick={() => setNote(SAMPLE_NOTE)}>
+                  Load sample
+                </button>
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    setNote("");
+                    setReply("");
+                    setMeta(null);
+                    setError("");
+                  }}
                 >
-                  ⚠ {error}
-                </motion.div>
-              )}
-            </AnimatePresence>
+                  Clear
+                </button>
+              </div>
+            </div>
 
-            <div className="footerNote">Reference UI for your local model. Validate clinically. 💉🩻</div>
+            <div className="body">
+              <textarea
+                className="textarea"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Paste or type the clinical note / case details here..."
+              />
+
+              <div className="metaRow">
+                <span>
+                  Preset: <strong>{preset}</strong>
+                </span>
+                <span>•</span>
+                <span>{presetHint}</span>
+                <span>•</span>
+                <span className="muted">Tip: vitals + labs early 🧪 • imaging pending 🩻</span>
+              </div>
+
+              <div className="btnRow">
+                <motion.button
+                  className={"btn " + (preset === "quick" ? "btnActive" : "")}
+                  onClick={() => setPreset("quick")}
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  ⚡ Quick
+                </motion.button>
+
+                <motion.button
+                  className={"btn " + (preset === "normal" ? "btnActive" : "")}
+                  onClick={() => setPreset("normal")}
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  📋 Normal
+                </motion.button>
+
+                <motion.button
+                  className={"btn " + (preset === "detailed" ? "btnActive" : "")}
+                  onClick={() => setPreset("detailed")}
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  🧠 Detailed
+                </motion.button>
+
+                <div style={{ flex: 1 }} />
+
+                <motion.button
+                  className="btn primary"
+                  onClick={runAnalyze}
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <span className="inline">
+                      <span className="spinner" /> Analyzing…
+                    </span>
+                  ) : (
+                    "▶ Analyze"
+                  )}
+                </motion.button>
+              </div>
+
+              <AnimatePresence>
+                {!!error && (
+                  <motion.div
+                    className="toast"
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 8 }}
+                    transition={{ duration: 0.18 }}
+                  >
+                    ⚠ {error}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <div className="footerNote">Reference UI for your local model. Validate clinically. 💉🩻</div>
+            </div>
+          </div>
+
+          {/* RIGHT */}
+          <div className="card">
+            <div className="cardHead">
+              <div className="cardTitle">
+                <span className="emoji">🫀</span> Model reply
+              </div>
+              <div className="controls">
+                <button className="btn small" onClick={() => copy("reply")} disabled={!reply}>
+                  Copy reply
+                </button>
+                <button className="btn small" onClick={() => copy("meta")} disabled={!meta}>
+                  Copy meta
+                </button>
+              </div>
+            </div>
+
+            <div className="body">
+              <motion.div
+                ref={outputRef}
+                className="output"
+                initial={{ opacity: 0.0, y: 6 }}
+                animate={{ opacity: 1.0, y: 0 }}
+                transition={{ duration: 0.22 }}
+              >
+                {reply ? reply : "No reply yet. Click Analyze. 🩺"}
+              </motion.div>
+
+              <div className="metaRow">
+                <span>Meta:</span>
+                <span className="pill dim">
+                  {meta?.latency_ms ? `latency ${meta.latency_ms} ms` : "latency n/a"}
+                </span>
+                <span className="pill dim">{meta?.passes != null ? `passes ${meta.passes}` : "passes n/a"}</span>
+                <span className="pill dim">
+                  {meta?.usage?.total_tokens != null ? `tokens ${meta.usage.total_tokens}` : "tokens n/a"}
+                </span>
+              </div>
+
+              <div className="output metaBox">{meta ? safeStr(meta) : "Meta will appear here when debug=true."}</div>
+            </div>
           </div>
         </div>
-
-        {/* RIGHT */}
-        <div className="card">
-          <div className="cardHead">
-            <div className="cardTitle">
-              <span className="emoji">🫀</span> Model reply
-            </div>
-            <div className="controls">
-              <button className="btn small" onClick={() => copy("reply")} disabled={!reply}>
-                Copy reply
-              </button>
-              <button className="btn small" onClick={() => copy("meta")} disabled={!meta}>
-                Copy meta
-              </button>
-            </div>
-          </div>
-
-          <div className="body">
-            <motion.div
-              ref={outputRef}
-              className="output"
-              initial={{ opacity: 0.0, y: 6 }}
-              animate={{ opacity: 1.0, y: 0 }}
-              transition={{ duration: 0.22 }}
-            >
-              {reply ? reply : "No reply yet. Click Analyze. 🩺"}
-            </motion.div>
-
-            <div className="metaRow">
-              <span>Meta:</span>
-              <span className="pill dim">
-                {meta?.latency_ms ? `latency ${meta.latency_ms} ms` : "latency n/a"}
-              </span>
-              <span className="pill dim">{meta?.passes != null ? `passes ${meta.passes}` : "passes n/a"}</span>
-              <span className="pill dim">
-                {meta?.usage?.total_tokens != null ? `tokens ${meta.usage.total_tokens}` : "tokens n/a"}
-              </span>
-            </div>
-
-            <div className="output metaBox">{meta ? safeStr(meta) : "Meta will appear here when debug=true."}</div>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

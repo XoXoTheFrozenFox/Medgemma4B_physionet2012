@@ -1,9 +1,7 @@
-// This is a basic Flutter widget test.
+// test/widget_test.dart
 //
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// Basic widget smoke test for the current MedGemma UI.
+// (Replaces the default counter test.)
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,20 +9,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:llm_medgemma/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MedGemmaApp());
+  testWidgets('App builds (smoke test)', (WidgetTester tester) async {
+    // If your MedGemmaApp now requires firebaseInitError, pass a safe value.
+    // If your constructor does NOT require it, you can remove the argument.
+    await tester.pumpWidget(const MedGemmaApp(firebaseInitError: ""));
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    // Let first frame settle (animations/timers may still be running, so don't pumpAndSettle).
+    await tester.pump(const Duration(milliseconds: 50));
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    // Basic assertions that the app rendered.
+    expect(find.byType(MaterialApp), findsOneWidget);
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Optional: check for a known title string from your UI (adjust if you renamed it).
+    expect(find.textContaining('Triage'), findsWidgets);
   });
 }
