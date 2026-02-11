@@ -22,5 +22,5 @@
 <h2 align="center">🛠️Tools and technologies used⚒️</h2>
 <div align="center">
      <img src="https://skillicons.dev/icons?i=github,anaconda,python,sklearn,pytorch,fastapi,powershell,bash,windows,linux,regex,dart" />
-     <img src="https://skillicons.dev/icons?i=flutter,gradle,npm,nodejs,html,css,javascript,typescript,react,electron,vite,latex,vscode,androidstudio" /> 
+     <img src="https://skillicons.dev/icons?i=flutter,gradle,npm,nodejs,html,css,javascript,typescript,react,electron,vite,latex,vscode,androidstudio,firebase" /> 
 </div>
