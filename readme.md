@@ -4,6 +4,10 @@
   <img
     src="https://media1.tenor.com/m/sb3t5hryba4AAAAd/bruh.gif" alt="bruh gif" width="1200"
   />
+<p align="center">
+  <img
+    src="https://media1.tenor.com/m/_ojOdyBFWv0AAAAd/what-the-hell-am-i-doing-here-creep-club-pinguin.gif" alt="bruh gif" width="1200"
+  />
 </p>
 <h2 align="center">Project icon</h2>
 <img src="https://github.com/user-attachments/assets/324da53a-51c9-4e30-8eb2-c87ce8687c74" />
