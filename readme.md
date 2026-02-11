@@ -1,4 +1,8 @@
 <h1 align="center">🤕ICU clinical assistance on physionet2012🤕</h1>
+<h2 align="center">Feels this project gave me😎</h2>
+<p align="center">
+  <img src="https://media1.tenor.com/m/sb3t5hryba4AAAAd/bruh.gif" alt="bruh gif" />
+</p>
 <h2 align="center">Project icon</h2>
 <img src="https://github.com/user-attachments/assets/324da53a-51c9-4e30-8eb2-c87ce8687c74" />
 <h2 align="center">Project banner</h2>
