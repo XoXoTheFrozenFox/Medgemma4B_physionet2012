@@ -25,8 +25,10 @@ Please do not fork this repo and use the model's output for medical advice. For 
 <h2 align="center">Training graphs generated on a validation sample of 100 data points</h2>
 <img src="https://github.com/user-attachments/assets/5ef29496-88e5-4de3-9ada-04b8fa8084cb" />
 <img src="https://github.com/user-attachments/assets/102cebdf-4772-412f-b272-2727f5483159" /> 
-<h2 align="center">Project architecture</h2>
+<h2 align="center">Project architecture local</h2>
 <img src="https://github.com/user-attachments/assets/1c1c7b81-a31b-4dbd-aa5c-09114abadd31" />
+<h2 align="center">Project architecture deployment</h2>
+  <img src="https://github.com/user-attachments/assets/78596fb5-04ef-415b-b5f2-5d0602db48ee" />
 <h2 align="center">API logs</h2>
 <img src="https://github.com/user-attachments/assets/4d619f17-351d-497c-bca2-d0ebf9616919" />
 <h2 align="center">Login</h2>
