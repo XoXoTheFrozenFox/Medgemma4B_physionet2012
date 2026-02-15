@@ -1,267 +1,177 @@
-\documentclass[10pt,twocolumn]{article}
+% !TeX program = pdflatex
+\documentclass[10pt,a4paper]{article}
 
-\usepackage[margin=0.75in]{geometry}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{amsmath}
+% ----------------------------
+% Dual (two-column) layout
+% ----------------------------
+\usepackage[a4paper,margin=1.8cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
 \usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{enumitem}
-\setlist[itemize]{leftmargin=*,noitemsep,topsep=2pt}
-\setlength{\columnsep}{0.22in}
+\usepackage{multicol}
+\usepackage{multicol}
+\raggedcolumns
+% Optional: if you ever meant "two pages per sheet" (2-up printing), uncomment:
+% \usepackage{pgfpages}
+% \pgfpagesuselayout{2 on 1}[a4paper,border shrink=5mm]
 
-\title{\vspace{-0.5em}\bf ICU ``What's Getting Worse?'' Copilot: Offline Trend Summarization with MedGemma 27B + QLoRA on PhysioNet 2012\vspace{-0.4em}}
-\author{Team: \textit{[Your Team Name]} \quad Contact: \textit{[email]} \quad Repo: \textit{[GitHub URL]}}
-\date{}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.35em}
+\setlist[itemize]{leftmargin=1.2em, itemsep=0.25em, topsep=0.2em}
+\setlist[enumerate]{leftmargin=1.2em, itemsep=0.25em, topsep=0.2em}
+
+% Two-column tuning
+\setlength{\columnsep}{0.9cm}
+\setlength{\columnseprule}{0pt}
+\emergencystretch=1em
+
+\newcommand{\placeholder}[1]{\textcolor{black!55}{\textit{#1}}}
+\newcommand{\codepath}[1]{\texttt{#1}}
+\newcommand{\maybeinclude}[2]{\IfFileExists{#1}{\includegraphics[#2]{#1}}{}}
 
 \begin{document}
-\maketitle
-\vspace{-0.8em}
 
-\begin{abstract}
-ICU clinicians must continuously interpret streams of vitals and labs. The cognitive burden is high, trend interpretation is repetitive, and deterioration signals may be missed when data are fragmented across screens. We present an offline ``trend summarizer'' copilot that converts the last 12 hours of measurements into a concise deterioration narrative with supporting evidence and suggested checks. The system uses MedGemma 27B (text-only instruction-tuned) adapted via 4-bit QLoRA on a public ICU dataset (PhysioNet/CinC Challenge 2012). A lightweight Streamlit interface provides human-centered summaries, explicitly flags missing data, and outputs strict JSON for downstream integration. This demonstration targets privacy-constrained clinical environments by enabling local inference on a single 24GB GPU.
-\end{abstract}
+% ----------------------------
+% Banner title (full width)
+% ----------------------------
+\begin{center}
+  % Safer include (won't error if missing):
+  \maybeinclude{banner.png}{width=\linewidth,height=5cm,keepaspectratio}\par
+  {\Large\textbf{TriageAssist-SA: AI Clinical Decision Support for ICU Patient Care}}\par
+  {\small \textbf{Team name: Ubuntu HealthAI Lab}}\par
+\end{center}
 
-\vspace{-0.6em}
-\section{Problem \& Unmet Need}
-ICU care requires rapid synthesis of evolving physiology. Clinicians often review the same variables (e.g., blood pressure, oxygenation, lactate, creatinine) to answer: \emph{Is the patient getting worse, why, and what should I verify next?} In practice, vitals/labs are distributed across multiple views, and trend interpretation is time-consuming and error-prone. Closed models are frequently unsuitable due to connectivity requirements and privacy constraints.
+% ----------------------------
+% Start dual-column body
+% ----------------------------
+\begin{multicols*}{2}
 
-\textbf{Goal.} Build a human-centered, offline-capable copilot that:
-\vspace{-0.2em}
-\begin{itemize}
-  \item summarizes the \textbf{last 12h} trends into an actionable narrative,
-  \item provides \textbf{evidence} (key numbers/trends),
-  \item suggests \textbf{what to check next} (not prescriptions),
-  \item avoids hallucination by acknowledging missing data,
-  \item returns \textbf{strict JSON} to support EHR integration.
-\end{itemize}
+\section*{Project name}
+TriageAssist-SA: AI Clinical Decision Support for ICU Patient Care.
 
-\section{Users \& Human-Centered Design}
-\textbf{Primary users:} bedside ICU clinicians (physicians, nurses, advanced practitioners). \textbf{Secondary users:} charge nurses and rapid response teams who need quick deterioration signals.
+\section*{Team}
+\textbf{Bernard Swanepoel, MSc Computer Science (2026)} led the backend and AI work. He designed the end-to-end workflow and implemented the PhysioNet2012 conversion into long-format data, rolling-window feature generation, weak-supervision labeling rules, optional QLoRA fine-tuning, and the evaluation tooling. He also integrated MedGemma behind a local FastAPI service and added inference safeguards to keep outputs stable under repeated requests and longer generations. \\\\
+\textbf{Charlene Cockcroft, BPharm Pharmacy (2026)} Led the frontend and authentication work. She implemented the React web app, Flutter mobile app, and Electron desktop app, focusing on consistent rendering of the structured clinical output and predictable behavior across platforms. She also implemented Firebase Authentication across clients and coordinated secure request flows using verified ID tokens. Additionally, with her background in health care she assisted in defining the problem and providing the dataset.
 
-\textbf{Design choices.}
-\vspace{-0.3em}
-\begin{itemize}
-  \item \textbf{Structured output:} strict JSON keys \texttt{status}, \texttt{drivers}, \texttt{what\_to\_check\_next}, \texttt{evidence}, \texttt{narrative}, \texttt{disclaimer}.
-  \item \textbf{Evidence-first:} numeric values and trend slopes appear in the evidence list.
-  \item \textbf{Uncertainty:} ``NA'' is preserved; the model is instructed not to infer missing measurements.
-  \item \textbf{Human-in-the-loop:} the UI displays raw output + parsed JSON, enabling clinician editing/copying into notes.
-\end{itemize}
+\section*{Problem statement}
+South Africa faces a high clinical workload and unequal access patterns across the public and private health sectors. A minority of people report having medical aid coverage, while most patients rely on a resource-constrained public system \cite{StatsSA_GHS2021}. In ICU practice, this translates into time pressure during rounds and handover, where clinicians must interpret many signals that evolve over time and decide whether a patient is stable, deteriorating, or simply under-monitored.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/ui_screenshot_placeholder.png}
-  \caption{(\textbf{Placeholder}) Streamlit UI: paste a 12h feature summary, generate strict JSON + narrative, and review evidence/missing data.}
-  \label{fig:ui}
-\vspace{-0.8em}
-\end{figure}
+Clinicians often need a concise answer to two practical questions: \textit{Does the patient look stable or worsening from trends?} and \textit{What should I check next to confirm or correct that impression?} When information is missing or contradictory, forcing a confident decision can be unsafe. TriageAssist-SA therefore treats uncertainty as a valid outcome and makes missing data explicit, rather than guessing. The expected impact is reduced cognitive load, more standardized communication of trend-based reasoning, and earlier detection of deterioration signals in high-throughput settings.
 
-\section{Data: Public ICU Dataset (PhysioNet 2012)}
-We use the PhysioNet/CinC Challenge 2012 training set (public). Each patient record is a time-stamped table of ICU measurements (timestamp, parameter, value). We focus on a subset of common vitals and labs present in the dataset (e.g., HR, MAP, SBP/DBP, RR, temperature, oxygenation proxy, lactate, creatinine, WBC, ABG-related variables when available).
+This work is framed as a feasibility-oriented prototype aligned with South Africa’s direction toward stronger system-wide coverage and governance, including National Health Insurance discussions and implementation planning \cite{NDoH_NHIKeyMessages,NHI_Act2023}.
+\section*{Solution}
+TriageAssist-SA runs MedGemma 1.5 4B-IT behind a local FastAPI service and exposes a simple API contract used by three clients: a React web app, a Flutter mobile app, and an Electron desktop app. The service enforces a strict clinician-facing output format with labeled sections so the response can be scanned quickly and rendered consistently without fragile client-side heuristics.
 
-\textbf{Why this dataset?} It is publicly accessible and provides realistic irregular sampling patterns found in ICUs, enabling a compelling demo without credentialed datasets.
+To keep generation reliable in a demo setting, the server includes safeguards that prevent common failure modes such as empty outputs, special-token-only outputs, and duplicated sections across continuation passes. The system prompt is tuned for ICU triage language and enforces the stability framing: outputs must label \textbf{STABLE}, \textbf{WORSENING}, or \textbf{UNCERTAIN} and then justify that label using only observable facts from the input.
 
-\section{System Overview}
-Figure~\ref{fig:pipeline} summarizes the end-to-end pipeline.
+Firebase Authentication is used so the demo can be shared without distributing static keys. Users sign in on the client, the client attaches a Firebase ID token to each request, and the server verifies the token before returning analysis \cite{FirebaseAuthDocs}. This allows the same service to be accessed from multiple clients while keeping access controlled and auditable.
 
-\textbf{Model artifacts created.}
-\vspace{-0.3em}
-\begin{itemize}
-  \item \textbf{Weak-supervision labeler (rules):} generates pseudo-label JSON targets from trend features (``stable'' vs ``worsening'' + driver tags).
-  \item \textbf{MedGemma 27B QLoRA adapter:} a fine-tuned LoRA adapter trained to emit strict JSON summaries from trend features.
-\end{itemize}
+\section*{Technical details}
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/pipeline_placeholder.png}
-  \caption{(\textbf{Placeholder}) Pipeline: PhysioNet 2012 $\rightarrow$ long-format CSV $\rightarrow$ 12h windows $\rightarrow$ trend features $\rightarrow$ prompt/target JSONL $\rightarrow$ MedGemma 27B QLoRA fine-tuning $\rightarrow$ offline inference in Streamlit.}
-  \label{fig:pipeline}
-\vspace{-0.9em}
-\end{figure}
-
-\section{Preprocessing \& Window Featurization}
-\textbf{Conversion.} We convert per-patient text files into a single long-format CSV:
+\subsection*{Data baseline: PhysioNet2012 conversion and long-format schema}
+This project is kept strictly in the context of \textbf{PhysioNet 2012}. We use it because it provides ICU time-series measurements that can be transformed into consistent, reproducible trend summaries \cite{PhysioNet2012}. Raw records are converted into a long-format table with a stable schema:
 \[
-(\texttt{stay\_id}, \texttt{ts}, \texttt{var}, \texttt{value}, \texttt{unit})
+\langle \texttt{stay\_id}, \texttt{ts}, \texttt{var}, \texttt{value}, \texttt{unit} \rangle
 \]
-This simplifies sampling and windowing.
+A mapping converts PhysioNet2012 variable names into a compact triage set, including core vitals and core labs. In this demo, arterial oxygen saturation (\texttt{SaO2}) is mapped to \texttt{SpO2} as a practical proxy for a vitals-oriented trend summary, and blood pressure fields are mapped into \texttt{SBP}/\texttt{DBP}/\texttt{MAP} where available. The resulting variable set is intentionally small because the goal is fast, robust prompting rather than exhaustive chart reconstruction.
 
-\textbf{12h windows.} For each patient, we slide a 12-hour window with a 6-hour stride (configurable). For each variable, we compute:
-\vspace{-0.4em}
+\subsection*{Trend windowing: 12-hour summaries with directional features}
+Examples are built using rolling windows per stay. A typical configuration uses a 12-hour window with a 6-hour stride. Within each window, each variable is featurized with the last observed value, minimum, maximum, mean, and a simple slope estimate per hour. This representation is compact enough for stable prompting while retaining directional change, which is often the difference between ``concerning'' and ``acceptable'' in ICU monitoring. Windows that are too empty are skipped so the model is not trained to hallucinate missing information.
+
+\subsection*{Targets: weak supervision for reproducible training and testing}
+To keep the pipeline reproducible on PhysioNet2012, supervision targets are generated using transparent heuristic rules rather than private clinical labels. The labeling logic flags potential deterioration signals such as hypotension or elevated lactate, low oxygenation or high respiratory rate, rising creatinine trends, or infection-like patterns such as abnormal white cell count or elevated temperature. These rules are not meant to replace clinical judgment; they provide consistent training signals that encourage sensible triage behavior and reliable formatting.
+
+Each example includes a prompt and a strict JSON target containing keys such as \texttt{status}, \texttt{drivers}, \texttt{what\_to\_check\_next}, \texttt{evidence}, a short \texttt{narrative}, and a disclaimer. The train/validation split is performed by \texttt{stay\_id} to reduce leakage, and a configurable per-stay window cap helps prevent a few long stays from dominating training.
+
+\subsection*{Modeling: MedGemma + QLoRA fine-tuning (core approach)}
+This project centers on fine-tuning \textbf{MedGemma 1.5 4B-IT} using \textbf{QLoRA} on the generated PhysioNet2012 prompt/target pairs. MedGemma serves as the HAI-DEF foundation model, and the training objective is to produce cautious, triage-centric outputs with stable section structure rather than overclaiming clinical certainty \cite{MedGemmaCard}.
+
+QLoRA keeps training feasible on limited hardware by loading the base model in \textbf{4-bit NF4} while training lightweight adapter parameters. The fine-tuning script uses causal language modeling with \textbf{loss masking} so that training occurs only on assistant tokens (the target JSON/structured output) rather than the user prompt. It includes \textbf{token\_type\_ids} handling required by Gemma variants, \textbf{pad-safe collation} with label padding set to \texttt{-100}, and a conservative strategy to avoid injecting LoRA layers into vision module paths to prevent unintended adaptation of non-target components.
+
+Training was performed locally on an \textbf{NVIDIA RTX 4090}, and inference for the multi-client demo was run locally on an \textbf{NVIDIA RTX 3070 Ti}. This split reflects a practical deployment pattern: heavier fine-tuning on a high-VRAM workstation GPU, while day-to-day interactive inference remains feasible on a more common developer-grade GPU.
+
+For stability and memory safety, the training pipeline force-disables \texttt{use\_cache} when gradient checkpointing is enabled, applies a non-reentrant checkpointing configuration when supported, and provides evaluation controls (smaller evaluation sequence length or fully disabling evaluation) to reduce out-of-memory failures during fine-tuning.
+
+\subsection*{System prompt and response contract}
+A key product decision is that the model output must be easy to scan and stable across clients. TriageAssist-SA enforces a clinician-facing layout that begins with a status label and then follows with short, structured sections. The server prompt instructs the model to use only observable facts from the provided window summary, to avoid hidden reasoning, and to explicitly list missing information when confidence is limited.
+
+The contract is designed for speed and safety:
 \begin{itemize}
-  \item last value, min, max, mean, and
-  \item linear slope per hour (least-squares) over the window.
+  \item \textbf{Status} is one of \texttt{STABLE}, \texttt{WORSENING}, or \texttt{UNCERTAIN}.
+  \item \textbf{Why} contains a few short bullets that directly reflect the PhysioNet2012-derived input values or trends.
+  \item \textbf{Immediate Actions} prioritizes ABCs, monitoring, escalation, and concrete checks.
+  \item \textbf{Red Flags} is included only when the input supports it or when risk is clearly high.
+  \item \textbf{Missing Data} is used when uncertainty is unavoidable and is written as actionable requests.
 \end{itemize}
+This contract stays consistent across presets, which keeps UI behavior predictable and reduces client-side special cases.
 
-The resulting ``window text'' is a compact, model-friendly representation, e.g.:
-\small
-\begin{verbatim}
-MAP: last=61, min=58, max=74, mean=66, slope_hr=-0.09
-Lactate: last=2.8, min=1.5, max=3.0, mean=2.3, slope_hr=0.04
-...
-\end{verbatim}
-\normalsize
+\subsection*{Inference server: robust generation and a stable API}
+The FastAPI service implements a single analysis endpoint and exposes health diagnostics. The \codepath{/health} endpoint reports readiness and includes adapter sanity information such as whether an adapter is active and whether LoRA parameters are present. The \codepath{/v1/analyze} endpoint accepts a preset plus a case note and returns the structured response.
 
-\section{Weak Supervision Targets (Demo Labels)}
-Clinical-grade labels for deterioration narratives are rarely available. For a hackathon-grade demonstration, we generate pseudo-labels using transparent heuristics:
-\vspace{-0.4em}
-\begin{itemize}
-  \item \textbf{Hemodynamic concern:} MAP $<$ 65 and/or lactate $>$ 2.0.
-  \item \textbf{Respiratory concern:} low oxygenation proxy and/or elevated RR.
-  \item \textbf{Renal concern:} rising creatinine slope or elevated creatinine.
-  \item \textbf{Infection/inflammation concern:} abnormal WBC and/or fever.
-\end{itemize}
-These rules populate \texttt{drivers}, \texttt{evidence}, and \texttt{what\_to\_check\_next}. The objective is not clinical decision support but a reproducible prototype that demonstrates how MedGemma can be adapted to ICU trend summarization.
+Presets exist because ICU usage varies. The \texttt{quick} preset aims for short triage output, the \texttt{normal} preset targets a practical structured summary, and the \texttt{detailed} preset supports more comprehensive workup discussion while remaining cautious. Reliability safeguards directly improve product usability: the service retries when decoding yields empty text, optionally bans special-token-only outputs during retry, trims overlap when using continuation passes, and stops early when the quick-format structure is already complete.
 
-\section{Model Adaptation with MedGemma 27B (QLoRA)}
-\textbf{Base model.} MedGemma 27B text-only instruction-tuned model.
+\subsection*{South Africa deployment considerations: offline-first and governance-ready}
+Although training and evaluation are performed on PhysioNet2012, the product design is motivated by South African operating conditions. A local FastAPI deployment supports an ``edge'' workflow where inference can run inside a hospital network or on a clinician workstation without sending patient data to external services. This approach supports practical privacy-by-design thinking, and it aligns with South African expectations around responsible handling of personal information and health data governance \cite{POPIA_Regulations2025}.
 
-\textbf{Fine-tuning.} We perform parameter-efficient fine-tuning with QLoRA:
-\vspace{-0.4em}
-\begin{itemize}
-  \item 4-bit NF4 quantization, double quantization,
-  \item LoRA rank $r \in \{4,8\}$ (default $r=8$),
-  \item gradient checkpointing enabled,
-  \item training on a single 24GB GPU with gradient accumulation.
-\end{itemize}
+The multi-client architecture is a feasibility test in itself. Web, mobile, and desktop clients stress the same contract under different network conditions and request timeouts. A stable server-side format reduces UI errors during demos and helps ensure that structured outputs can be audited and versioned as the system evolves.
 
-\textbf{Prompting.} Each training example includes an instruction to output \emph{strict JSON} and to avoid inventing missing data. We train as causal LM where the target JSON is the assistant message.
+\subsection*{Clients and authentication: one contract across three apps}
+All three clients call the same API and render the same labeled sections. The React web client supports fast iteration and clear visualization of the structured output. The Flutter mobile client is designed for longer request times and unstable networks, so it emphasizes timeout control, retries, and clear progress feedback. The Electron desktop client supports a local demo flow where the API runs on the same machine and the user experience remains consistent without cloud dependencies.
 
-\begin{table}[t]
-\centering
-\small
-\begin{tabular}{@{}ll@{}}
-\toprule
-Setting & Value (default) \\
-\midrule
-Window length / stride & 12h / 6h \\
-Max sequence length & 512 (fallback 384) \\
-Batch size & 1 \\
-Grad accumulation & 16 (fallback 32) \\
-LoRA rank / alpha & 8 / 16 \\
-Quantization & 4-bit NF4 \\
-Epochs & 1+ (demo) \\
-\bottomrule
-\end{tabular}
-\caption{Training configuration (tuned for 24GB VRAM). Replace with your final settings.}
-\label{tab:traincfg}
-\vspace{-0.9em}
-\end{table}
+Firebase Authentication provides a lightweight identity layer that works across web, mobile, and desktop. Users authenticate in the client, then the client includes \codepath{Authorization: Bearer <id\_token>} on requests. The server verifies the Firebase ID token before processing. This avoids embedding static keys in applications and supports controlled access when the demo is shared.
 
-\section{Evaluation: Metrics \& Graphs}
-We evaluate on held-out patient stays (split by \texttt{stay\_id} to avoid leakage). Because the task is structured generation, we report:
-\vspace{-0.5em}
-\begin{itemize}
-  \item \textbf{JSON parse rate:} fraction of outputs parsed as valid JSON.
-  \item \textbf{Status accuracy:} accuracy on \texttt{status} (e.g., stable vs worsening).
-  \item \textbf{Drivers F1 (set-F1):} overlap between predicted and target \texttt{drivers}.
-  \item \textbf{Checks F1 (set-F1):} overlap for \texttt{what\_to\_check\_next}.
-  \item \textbf{Narrative ROUGE-L:} similarity of generated vs target narrative text.
-\end{itemize}
+\subsection*{Evaluation and reporting on PhysioNet2012 splits}
+The evaluation script focuses on product-critical properties using the PhysioNet2012-derived validation set. It measures JSON parse rate and required-key coverage because format reliability is essential for a user interface. It also computes status agreement with the weak-supervision target, set-based similarity scores (F1 and Jaccard) for \texttt{drivers} and \texttt{what\_to\_check\_next}, and ROUGE-L for narrative similarity. Latency and generation length are logged because an ICU-facing tool must remain usable under time constraints.
 
-\textbf{Graphs produced by our codebase (placeholders below).}
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/training_loss_placeholder.png}
-  \caption{(\textbf{Placeholder}) Training/eval loss curve from \texttt{trainer\_state.json}.}
-  \label{fig:loss}
-\vspace{-0.9em}
-\end{figure}
+\subsection*{Limitations and next steps}
+This system is a demo and research prototype, and its labels are generated by rules rather than clinical outcomes. PhysioNet2012 provides a strong reproducible baseline, but it is not South African data, so domain shift is expected. The trend representation is intentionally compact and can miss rare events between measurements, and it does not incorporate therapy context (ventilator settings, vasopressor dosing, fluid balance), which is often necessary to interpret whether abnormal values represent deterioration or controlled treatment.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/status_confusion_placeholder.png}
-  \caption{(\textbf{Placeholder}) Confusion matrix for \texttt{status} on validation samples.}
-  \label{fig:cm}
-\vspace{-0.9em}
-\end{figure}
+Next, we would keep the same pipeline structure but validate it against locally governed datasets once approvals, data agreements, and privacy processes are in place. That would allow calibration of uncertainty behavior and confirmation that the triage categories remain clinically sensible in South African ICU environments. We would also add stronger refusal behavior when essential fields are missing and lightweight monitoring for failure rates and latency, because operational reliability is part of clinical feasibility.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{figures/metrics_bar_placeholder.png}
-  \caption{(\textbf{Placeholder}) Key validation metrics: JSON parse rate, status accuracy, drivers/checks set-F1, narrative ROUGE-L.}
-  \label{fig:metrics}
-\vspace{-0.9em}
-\end{figure}
+{\footnotesize\textbf{Disclaimer.} This project is a demo and research prototype built on PhysioNet2012 for reproducibility. It is not medical advice, and clinician review is required.}
+{\small
+\begin{thebibliography}{9}
 
-\textbf{Results (fill with your numbers).} Table~\ref{tab:results} is a compact summary to update after running evaluation.
-\begin{table}[t]
-\centering
-\small
-\begin{tabular}{@{}lr@{}}
-\toprule
-Metric & Value \\
-\midrule
-JSON parse rate & [\_\_\_] \\
-Status accuracy & [\_\_\_] \\
-Drivers F1 (mean) & [\_\_\_] \\
-Checks F1 (mean) & [\_\_\_] \\
-ROUGE-L narrative (mean) & [\_\_\_] \\
-\bottomrule
-\end{tabular}
-\caption{Validation metrics (replace placeholders with \texttt{reports/metrics.json}).}
-\label{tab:results}
-\vspace{-0.9em}
-\end{table}
+\bibitem{PhysioNet2012}
+PhysioNet.
+\newblock \emph{Computing in Cardiology Challenge 2012: Predicting Mortality of ICU Patients}.
+\newblock \url{https://physionet.org/content/challenge-2012/1.0.0/} (accessed 2026-02-15).
 
-\section{Product Feasibility \& Deployment}
-\textbf{Offline inference.} The Streamlit demo loads MedGemma 27B in 4-bit with the QLoRA adapter. This supports local, privacy-preserving inference on a single GPU. The UI is intentionally minimal: clinicians paste a 12h window summary (or an upstream extractor can supply it), click ``Generate,'' and receive strict JSON plus a readable narrative.
+\bibitem{StatsSA_GHS2021}
+Statistics South Africa.
+\newblock \emph{General Household Survey 2021 (Statistical Release P0318)}.
+\newblock \url{https://www.statssa.gov.za/publications/P0318/P03182021.pdf} (accessed 2026-02-15).
 
-\textbf{Integration path.} Because outputs are structured JSON, downstream systems can:
-\vspace{-0.5em}
-\begin{itemize}
-  \item log summaries to clinical notes,
-  \item trigger ``review'' flags when \texttt{status=worsening},
-  \item store \texttt{evidence} for auditability.
-\end{itemize}
+\bibitem{NDoH_NHIKeyMessages}
+South African National Department of Health.
+\newblock \emph{National Health Insurance: Key Messages}.
+\newblock \url{https://www.health.gov.za/wp-content/uploads/2024/06/NHI_key_messages.pdf} (accessed 2026-02-15).
 
-\section{Safety, Ethics, \& Limitations}
-This is \textbf{not} medical advice and must not be used as an autonomous clinical decision maker. Key safety measures:
-\vspace{-0.5em}
-\begin{itemize}
-  \item Mandatory \texttt{disclaimer} field in every output.
-  \item Instruction to avoid inventing missing measurements.
-  \item Evidence list to ground conclusions in observed trends.
-  \item Human-in-the-loop UI that displays raw output and parsed JSON for review.
-\end{itemize}
+\bibitem{NHI_Act2023}
+Republic of South Africa.
+\newblock \emph{National Health Insurance Act, 2023 (Act No. 20 of 2023)}.
+\newblock \url{https://lawlibrary.org.za/akn/za-act/2023-20/eng@2024-06-03} (accessed 2026-02-15).
 
-\textbf{Limitations.} (1) Pseudo-labels are rule-based and may not reflect true clinical deterioration. (2) Dataset coverage is limited and older. (3) Mapping of oxygenation variables is approximate when only certain measures exist. (4) Model outputs can still fail JSON formatting; parse-rate is explicitly measured.
+\bibitem{POPIA_Regulations2025}
+Information Regulator (South Africa).
+\newblock \emph{POPIA Regulations (Final), 21 Jan 2025}.
+\newblock \url{https://inforegulator.org.za/wp-content/uploads/2025/04/POPIA-2021-Regulations-FINAL-21-Jan-2025.pdf} (accessed 2026-02-15).
 
-\section{Impact Potential \& Next Steps}
-If validated in a clinical workflow, a trend summarizer could reduce time spent on routine trend interpretation and improve situational awareness during handoffs/rounds. Next steps:
-\vspace{-0.5em}
-\begin{itemize}
-  \item Replace weak labels with clinician-rated summaries (small curated set).
-  \item Add more temporal grounding (e.g., ``at 03:00 MAP fell to 58'').
-  \item Calibrate conservative language and uncertainty.
-  \item Evaluate on credentialed ICU datasets (e.g., MIMIC/eICU) where permitted.
-\end{itemize}
+\bibitem{MedGemmaCard}
+Google (Hugging Face).
+\newblock \emph{MedGemma 1.5 4B-IT model card}.
+\newblock \url{https://huggingface.co/google/medgemma-1.5-4b-it} (accessed 2026-02-15).
 
-\vspace{-0.2em}
-\section*{Reproducibility Checklist}
-\vspace{-0.5em}
-\begin{itemize}
-  \item Data download: PhysioNet 2012 training set A.
-  \item Conversion: \texttt{physionet2012\_to\_icu\_long.py} $\rightarrow$ \texttt{data/icu\_long.csv}.
-  \item Dataset build: \texttt{make\_dataset.py} $\rightarrow$ \texttt{train.jsonl}, \texttt{val.jsonl}.
-  \item Training: \texttt{train\_qlora.py} (MedGemma 27B, 4-bit QLoRA).
-  \item Evaluation/figures: \texttt{evaluate.py} $\rightarrow$ \texttt{reports/}.
-  \item Demo: \texttt{app\_streamlit.py}.
-\end{itemize}
-
-\vspace{-0.4em}
-\begin{thebibliography}{9}\small
-\bibitem{medgemma_modelcard}
-MedGemma Model Card. \emph{Google Health AI Developer Foundations}. [Accessed: \textit{insert date}].
-
-\bibitem{kaggle_medgemma_challenge}
-The MedGemma Impact Challenge. \emph{Kaggle Competition Page}. [Accessed: \textit{insert date}].
-
-\bibitem{physionet2012}
-PhysioNet/CinC Challenge 2012: Predicting In-Hospital Mortality of ICU Patients. \emph{PhysioNet}. [Accessed: \textit{insert date}].
-
-\bibitem{silva2012}
-Silva I., et al. Predicting In-Hospital Mortality of ICU Patients: The PhysioNet/Computing in Cardiology Challenge 2012. \emph{Computing in Cardiology}, 2012.
 \end{thebibliography}
+}
+
+\end{multicols*}
 
 \end{document}
