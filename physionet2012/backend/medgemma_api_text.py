@@ -140,7 +140,7 @@ def _estimate_ctx_limit(model: Any, fallback: int = 8192) -> int:
 def build_system_prompt(p: Preset) -> str:
     return (
         "You are a clinical decision-support assistant for ICU clinicians.\n"
-        "Your job is to assess whether the patient is STABLE or WORSENING based on the information provided.\n"
+        "Your job is to assess whether the patient is STABLE, WORSENING or UNCERTAIN based on the information provided.\n"
         "\n"
         "Rules:\n"
         f"- Keep the answer under ~{p.max_words_hint} words unless absolutely necessary.\n"

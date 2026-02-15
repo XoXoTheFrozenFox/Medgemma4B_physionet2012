@@ -135,3 +135,4 @@ app.*.map.json
 physionet2012/backend/backup.py
 /physionet2012/apps/mobile/build
 /physionet2019/results
+/physionet2019
